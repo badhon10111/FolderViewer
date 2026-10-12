@@ -18,6 +18,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.io.InputStream;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,6 +33,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private ListView listView;
     private Button permissionButton;
+    private Button connectButton;
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
     private ArrayAdapter<String> adapter;
@@ -44,6 +48,44 @@ public class MainActivity extends Activity {
         } else {
             showPermissionNeeded();
         }
+    }
+
+    // Publishable key is intended for client use; never put a Supabase secret/service_role key here.
+    private static final String SUPABASE_URL = "https://rvtqkldsapdtiocjygvc.supabase.co";
+    private static final String SUPABASE_PUBLISHABLE_KEY = "sb_publishable_OA3eukLqTY8BrL3lf5trwQ_apXWqXh-";
+
+    private void testSupabaseConnection() {
+        connectButton.setEnabled(false);
+        statusView.setText("Supabase সংযোগ পরীক্ষা হচ্ছে...");
+        new Thread(() -> {
+            HttpURLConnection connection = null;
+            String message;
+            try {
+                URL url = new URL(SUPABASE_URL + "/rest/v1/devices?select=id&limit=1");
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(10000);
+                connection.setRequestProperty("apikey", SUPABASE_PUBLISHABLE_KEY);
+                connection.setRequestProperty("Authorization", "Bearer " + SUPABASE_PUBLISHABLE_KEY);
+                connection.setRequestProperty("Accept", "application/json");
+                int code = connection.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    message = "Supabase সংযোগ সফল (HTTP " + code + ")। এখনো কোনো ফাইল রিকোয়েস্ট বা ডিলিট চালু নেই।";
+                } else {
+                    message = "Supabase উত্তর দিয়েছে, কিন্তু সংযোগ পরীক্ষা ব্যর্থ (HTTP " + code + ")। RLS/API সেটিংস পরীক্ষা করতে হবে।";
+                }
+            } catch (Exception e) {
+                message = "সংযোগ করা যায়নি। ইন্টারনেট ও Project URL পরীক্ষা করুন।";
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+            final String result = message;
+            runOnUiThread(() -> {
+                statusView.setText(result);
+                connectButton.setEnabled(true);
+            });
+        }).start();
     }
 
     private boolean hasAllFilesAccess() {
@@ -73,6 +115,11 @@ public class MainActivity extends Activity {
         permissionButton.setText("ফাইল অ্যাক্সেস অনুমতি দিন");
         permissionButton.setOnClickListener(v -> requestAllFilesAccess());
         root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
+
+        connectButton = new Button(this);
+        connectButton.setText("সার্ভার কানেকশন পরীক্ষা");
+        connectButton.setOnClickListener(v -> testSupabaseConnection());
+        root.addView(connectButton, new LinearLayout.LayoutParams(-1, -2));
 
         pathView = new TextView(this);
         pathView.setTextSize(13);
