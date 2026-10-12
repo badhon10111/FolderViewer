@@ -1,203 +1,224 @@
 package com.example.folderviewer;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.os.Bundle;
+import android.os.Build;
+import android.os.Environment;
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Bundle;
-import android.provider.DocumentsContract;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import org.xmlpull.v1.XmlPullParser;
-
-import java.util.ArrayDeque;
+import java.io.File;
+import java.text.DecimalFormat;
 import java.util.ArrayList;
-import java.util.Deque;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 
 public class MainActivity extends Activity {
-    private static final int PICK_FOLDER = 1001;
-    private LinearLayout root, list;
-    private TextView pathView, emptyView;
-    private Uri treeUri;
-    private String currentDocumentId;
-    private final Deque<String> history = new ArrayDeque<>();
+    private LinearLayout root;
+    private TextView pathView;
+    private TextView statusView;
+    private ListView listView;
+    private Button permissionButton;
+    private File currentDir;
+    private final List<File> shownFiles = new ArrayList<>();
+    private ArrayAdapter<String> adapter;
 
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
         buildUi();
-        showWelcome();
+
+        if (hasAllFilesAccess()) {
+            openDirectory(Environment.getExternalStorageDirectory());
+        } else {
+            showPermissionNeeded();
+        }
+    }
+
+    private boolean hasAllFilesAccess() {
+        return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager();
     }
 
     private void buildUi() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(18, 18, 18, 12);
+        root.setPadding(dp(16), dp(12), dp(16), dp(8));
         root.setBackgroundColor(0xFFF7F7F7);
 
         TextView title = new TextView(this);
         title.setText("Folder Viewer");
-        title.setTextSize(24);
-        title.setTextColor(0xFF111111);
-        root.addView(title);
+        title.setTextSize(28);
+        title.setTextColor(0xFF202124);
+        root.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView note = new TextView(this);
-        note.setText("শুধু ফাইল ও ফোল্ডার দেখা যাবে। কোনো ফাইল পরিবর্তন বা ডিলিট করা হবে না।");
-        note.setTextSize(14);
-        note.setTextColor(0xFF555555);
-        note.setPadding(0, 8, 0, 12);
-        root.addView(note);
+        TextView subtitle = new TextView(this);
+        subtitle.setText("ফাইল ও ফোল্ডার দেখা যাবে। অ্যাপ থেকে ফাইল পরিবর্তন বা ডিলিট করা যাবে না।");
+        subtitle.setTextSize(15);
+        subtitle.setTextColor(0xFF555555);
+        subtitle.setPadding(0, dp(6), 0, dp(12));
+        root.addView(subtitle, new LinearLayout.LayoutParams(-1, -2));
 
-        LinearLayout actions = new LinearLayout(this);
-        Button choose = new Button(this);
-        choose.setText("ফোল্ডার নির্বাচন");
-        choose.setOnClickListener(v -> pickFolder());
-        actions.addView(choose, new LinearLayout.LayoutParams(0, -2, 1));
-
-        Button back = new Button(this);
-        back.setText("পেছনে");
-        back.setOnClickListener(v -> goBack());
-        actions.addView(back, new LinearLayout.LayoutParams(-2, -2));
-        root.addView(actions);
+        permissionButton = new Button(this);
+        permissionButton.setText("ফাইল অ্যাক্সেস অনুমতি দিন");
+        permissionButton.setOnClickListener(v -> requestAllFilesAccess());
+        root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
 
         pathView = new TextView(this);
-        pathView.setTextColor(0xFF333333);
         pathView.setTextSize(13);
-        pathView.setPadding(0, 12, 0, 8);
-        root.addView(pathView);
+        pathView.setTextColor(0xFF444444);
+        pathView.setPadding(0, dp(10), 0, dp(8));
+        root.addView(pathView, new LinearLayout.LayoutParams(-1, -2));
 
-        ScrollView scroll = new ScrollView(this);
-        list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(list);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        statusView = new TextView(this);
+        statusView.setTextSize(15);
+        statusView.setTextColor(0xFF666666);
+        statusView.setGravity(Gravity.CENTER);
+        statusView.setPadding(0, dp(8), 0, dp(8));
+        root.addView(statusView, new LinearLayout.LayoutParams(-1, -2));
 
-        emptyView = new TextView(this);
-        emptyView.setTextColor(0xFF777777);
-        emptyView.setTextSize(15);
-        emptyView.setGravity(Gravity.CENTER);
-        emptyView.setText("প্রথমে ফোল্ডার নির্বাচন করুন।");
-        list.addView(emptyView);
+        listView = new ListView(this);
+        adapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
+        listView.setAdapter(adapter);
+        root.addView(listView, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        listView.setOnItemClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= shownFiles.size()) return;
+            File selected = shownFiles.get(position);
+            if (selected.isDirectory()) {
+                openDirectory(selected);
+            } else {
+                Toast.makeText(this, "শুধু দেখার জন্য: " + selected.getName(), Toast.LENGTH_SHORT).show();
+            }
+        });
 
         setContentView(root);
     }
 
-    private void showWelcome() {
-        pathView.setText("কোনো ফোল্ডার নির্বাচিত নয়");
-    }
-
-    private void pickFolder() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        startActivityForResult(intent, PICK_FOLDER);
-    }
-
-    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PICK_FOLDER && resultCode == RESULT_OK && data != null) {
-            treeUri = data.getData();
-            if (treeUri == null) return;
-            int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            try { getContentResolver().takePersistableUriPermission(treeUri, flags); }
-            catch (Exception ignored) {}
-            currentDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
-            history.clear();
-            showDirectory(currentDocumentId);
-        }
-    }
-
-    private void showDirectory(String documentId) {
-        if (treeUri == null) return;
-        currentDocumentId = documentId;
-        list.removeAllViews();
-        pathView.setText("Folder ID: " + documentId);
-        Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId);
-        String[] projection = {
-                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE,
-                DocumentsContract.Document.COLUMN_SIZE,
-                DocumentsContract.Document.COLUMN_LAST_MODIFIED
-        };
-        try (android.database.Cursor cursor = getContentResolver().query(childrenUri, projection, null, null,
-                DocumentsContract.Document.COLUMN_DISPLAY_NAME + " ASC")) {
-            if (cursor == null) throw new IllegalStateException("ফাইল তালিকা পড়া যায়নি");
-            if (!cursor.moveToFirst()) {
-                addMessage("এই ফোল্ডার খালি অথবা পড়ার অনুমতি নেই।");
-                return;
+    private void requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                intent.setData(Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+            } catch (Exception e) {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                startActivity(intent);
             }
-            do {
-                String id = cursor.getString(0);
-                String name = cursor.getString(1);
-                String mime = cursor.getString(2);
-                long size = cursor.isNull(3) ? -1 : cursor.getLong(3);
-                long modified = cursor.isNull(4) ? 0 : cursor.getLong(4);
-                boolean isDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
-                addEntry(id, name == null ? "(নাম নেই)" : name, isDir, size, modified);
-            } while (cursor.moveToNext());
-        } catch (Exception e) {
-            addMessage("এই ফোল্ডার পড়া যায়নি: " + e.getClass().getSimpleName());
-            Toast.makeText(this, "অনুমতি বা ফোল্ডার অ্যাক্সেস পরীক্ষা করুন", Toast.LENGTH_LONG).show();
+        } else {
+            openDirectory(Environment.getExternalStorageDirectory());
         }
     }
 
-    private void addEntry(String id, String name, boolean isDir, long size, long modified) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(12, 12, 12, 12);
-        row.setBackgroundColor(0xFFFFFFFF);
-        TextView label = new TextView(this);
-        label.setText((isDir ? "📁  " : "📄  ") + name);
-        label.setTextSize(16);
-        label.setTextColor(0xFF202020);
-        row.addView(label);
-        TextView details = new TextView(this);
-        details.setText(isDir ? "ফোল্ডার" : (size >= 0 ? formatSize(size) : "ফাইলের আকার জানা নেই"));
-        details.setTextSize(12);
-        details.setTextColor(0xFF666666);
-        row.addView(details);
-        row.setOnClickListener(v -> {
-            if (isDir) {
-                history.push(currentDocumentId);
-                showDirectory(id);
+    private void showPermissionNeeded() {
+        pathView.setText("স্টোরেজ: অনুমতি প্রয়োজন");
+        statusView.setText("ZArchiver-এর মতো Android-এর All files access সেটিংসে গিয়ে অনুমতি চালু করুন।");
+        permissionButton.setVisibility(View.VISIBLE);
+        adapter.clear();
+        shownFiles.clear();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (root != null) {
+            if (hasAllFilesAccess()) {
+                permissionButton.setVisibility(View.GONE);
+                if (currentDir == null || !currentDir.exists()) {
+                    openDirectory(Environment.getExternalStorageDirectory());
+                } else {
+                    openDirectory(currentDir);
+                }
             } else {
-                new AlertDialog.Builder(this)
-                        .setTitle(name)
-                        .setMessage("এটি শুধু দেখার অ্যাপ। ফাইল খোলা, সম্পাদনা বা ডিলিট করা হয় না।\n\n" + (size >= 0 ? "আকার: " + formatSize(size) : "আকার অজানা"))
-                        .setPositiveButton("ঠিক আছে", null)
-                        .show();
+                showPermissionNeeded();
+            }
+        }
+    }
+
+    private void openDirectory(File directory) {
+        if (!hasAllFilesAccess()) {
+            showPermissionNeeded();
+            return;
+        }
+        if (directory == null || !directory.isDirectory() || !directory.canRead()) {
+            statusView.setText("এই ফোল্ডারটি পড়া যাচ্ছে না।");
+            return;
+        }
+
+        currentDir = directory;
+        pathView.setText("বর্তমান ফোল্ডার: " + directory.getAbsolutePath());
+        permissionButton.setVisibility(View.GONE);
+        shownFiles.clear();
+
+        File[] files = directory.listFiles();
+        if (files == null) {
+            adapter.clear();
+            statusView.setText("ফাইল তালিকা পাওয়া যায়নি।");
+            return;
+        }
+
+        Arrays.sort(files, (a, b) -> {
+            if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
+            return a.getName().compareToIgnoreCase(b.getName());
+        });
+
+        List<String> labels = new ArrayList<>();
+        if (directory.getParentFile() != null) {
+            shownFiles.add(directory.getParentFile());
+            labels.add("⬆ .. (পেছনে)");
+        }
+        for (File file : files) {
+            shownFiles.add(file);
+            String label = file.isDirectory() ? "📁  " : "📄  ";
+            label += file.getName();
+            if (file.isDirectory()) {
+                label += "/";
+            } else {
+                label += "   (" + readableSize(file.length()) + ")";
+            }
+            labels.add(label);
+        }
+        adapter.clear();
+        adapter.addAll(labels);
+        statusView.setText(files.length + " টি আইটেম");
+        listView.setOnItemClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= shownFiles.size()) return;
+            File selected = shownFiles.get(position);
+            if (selected.isDirectory()) {
+                openDirectory(selected);
+            } else {
+                Toast.makeText(this, "শুধু দেখার জন্য: " + selected.getName(), Toast.LENGTH_SHORT).show();
             }
         });
-        list.addView(row);
-        View divider = new View(this);
-        divider.setBackgroundColor(0xFFE0E0E0);
-        list.addView(divider, new LinearLayout.LayoutParams(-1, 1));
     }
 
-    private void addMessage(String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextColor(0xFF666666);
-        tv.setPadding(8, 20, 8, 20);
-        list.addView(tv);
+    private String readableSize(long size) {
+        if (size < 1024) return size + " B";
+        if (size < 1024L * 1024) return new DecimalFormat("#.##").format(size / 1024.0) + " KB";
+        if (size < 1024L * 1024 * 1024) return new DecimalFormat("#.##").format(size / (1024.0 * 1024)) + " MB";
+        return new DecimalFormat("#.##").format(size / (1024.0 * 1024 * 1024)) + " GB";
     }
 
-    private void goBack() {
-        if (!history.isEmpty()) showDirectory(history.pop());
-        else if (treeUri != null) showDirectory(DocumentsContract.getTreeDocumentId(treeUri));
-        else Toast.makeText(this, "আগে একটি ফোল্ডার নির্বাচন করুন", Toast.LENGTH_SHORT).show();
+    @Override
+    public void onBackPressed() {
+        if (currentDir != null && currentDir.getParentFile() != null && hasAllFilesAccess()) {
+            openDirectory(currentDir.getParentFile());
+        } else {
+            super.onBackPressed();
+        }
     }
 
-    private String formatSize(long n) {
-        if (n < 1024) return n + " B";
-        if (n < 1024 * 1024) return String.format(java.util.Locale.US, "%.1f KB", n / 1024.0);
-        if (n < 1024L * 1024L * 1024L) return String.format(java.util.Locale.US, "%.1f MB", n / (1024.0 * 1024));
-        return String.format(java.util.Locale.US, "%.1f GB", n / (1024.0 * 1024 * 1024));
+    private int dp(int value) {
+        return (int) (value * getResources().getDisplayMetrics().density + 0.5f);
     }
-  }
+}
