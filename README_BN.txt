@@ -1,26 +1,16 @@
-Folder Viewer — Android source project
+Folder Viewer - All Files Access build
 
-এই অ্যাপটি শুধু ব্যবহারকারীর বেছে দেওয়া ফোল্ডার ও তার ভেতরের ফাইল/সাবফোল্ডার দেখায়।
-এতে Delete, Edit, Upload, Root access বা Server নেই।
+এই সংস্করণে Android-এর "All files access" সেটিংস খোলার ব্যবস্থা আছে।
+এটি ZArchiver-এর মতো বিশেষ অনুমতি চায়, তবে অ্যাপের নিজস্ব UI-তে ফাইল মুছা বা পরিবর্তনের সুবিধা নেই।
 
-APK তৈরি:
-1. Android Studio-তে এই FolderViewer ফোল্ডারটি Open করুন।
-2. Gradle sync সম্পন্ন হতে দিন (Android SDK এবং ইন্টারনেট লাগতে পারে)।
-3. Build > Build Bundle(s) / APK(s) > Build APK(s) নির্বাচন করুন।
-4. APK সাধারণত app/build/outputs/apk/debug/app-debug.apk-এ তৈরি হবে।
-5. নিজের ফোনে ইনস্টল করার আগে APK-টি পরীক্ষা করুন।
-
-সীমাবদ্ধতা:
-- Android-এর Storage Access Framework-এ ব্যবহারকারী যে ফোল্ডার অনুমোদন করেন শুধু সেটিই দেখা যায়।
-- /data/data এবং সুরক্ষিত সিস্টেম ফাইল দেখা যায় না।
-- এই পরিবেশে Android SDK/Gradle নেই, তাই এখানে APK build বা runtime test করা হয়নি।
-
-
-Cloud Build (GitHub Actions):
+GitHub-এ ব্যবহার:
 1. ZIP extract করুন।
-2. FolderViewer-এর ভেতরের সব ফাইল নতুন GitHub repository-তে আপলোড করুন (root-এ settings.gradle থাকবে)।
-3. Actions ট্যাবে "Build Android APK" workflow খুলে Run workflow চাপুন।
-4. Build সফল হলে Artifacts থেকে FolderViewer-debug-apk ডাউনলোড করুন।
-5. ZIP-এর ভেতরের app-debug.apk VPhoneOS/Android-এ ইনস্টল করে পরীক্ষা করুন।
+2. ভেতরের ফাইলগুলো আপনার FolderViewer repository-র root-এ একই path অনুযায়ী upload/replace করুন।
+3. .github/workflows/build-apk.yml-ও replace করুন।
+4. Commit changes করুন।
+5. Actions-এ FolderViewer-debug-apk artifact ডাউনলোড করুন।
 
-এ জন্য GitHub account ও internet দরকার। এই workflow-তে APK এখানে বিল্ড বা পরীক্ষা করা হয়নি; GitHub Actions-এ build সফল হলে তবেই APK পাওয়া যাবে।
+গুরুত্বপূর্ণ:
+- All files access খুব বিস্তৃত অনুমতি। শুধু নিজের পরীক্ষার ফোনে ব্যবহার করুন।
+- Android সেটিংসে অনুমতি চালু করার পর অ্যাপে ফিরে এলে ফাইল তালিকা দেখাবে।
+- এই ZIP-এ APK নেই; GitHub Actions দিয়ে build করার source code আছে।
