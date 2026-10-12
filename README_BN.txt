@@ -14,3 +14,11 @@ GitHub-এ ব্যবহার:
 - All files access খুব বিস্তৃত অনুমতি। শুধু নিজের পরীক্ষার ফোনে ব্যবহার করুন।
 - Android সেটিংসে অনুমতি চালু করার পর অ্যাপে ফিরে এলে ফাইল তালিকা দেখাবে।
 - এই ZIP-এ APK নেই; GitHub Actions দিয়ে build করার source code আছে।
+
+
+Supabase Connection Test build:
+- Adds a manual "সার্ভার কানেকশন পরীক্ষা" button.
+- Uses the project URL and publishable key supplied for this project.
+- It only sends a GET request to the devices table and does not create/delete files or rows.
+- If the request is blocked by API/RLS settings, the app will show the HTTP status.
+- Never replace the publishable key with a secret/service_role key.
