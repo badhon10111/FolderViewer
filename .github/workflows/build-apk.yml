@@ -26,13 +26,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The GitHub-hosted runner already has Android command-line tools.
+      # Do not ask setup-android to install a non-existent package named "tools".
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Install Android SDK packages
+      - name: Install required Android SDK packages
         run: sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
