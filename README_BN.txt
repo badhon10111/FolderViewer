@@ -1,24 +1,22 @@
-Folder Viewer - All Files Access build
+Folder Viewer — Supabase Connect/Ping + local file delete
 
-এই সংস্করণে Android-এর "All files access" সেটিংস খোলার ব্যবস্থা আছে।
-এটি ZArchiver-এর মতো বিশেষ অনুমতি চায়, তবে অ্যাপের নিজস্ব UI-তে ফাইল মুছা বা পরিবর্তনের সুবিধা নেই।
+এই ZIP-এ Android source code আছে; APK নেই। GitHub Actions দিয়ে APK build করতে হবে।
 
-GitHub-এ ব্যবহার:
+যা যোগ হয়েছে:
+1. "সার্ভার Connect / Ping" বাটন।
+2. প্রথমবার চাপলে DEVICE_ENROLLMENT_CODE চাইবে। এই মানটি Supabase Edge Function Secrets-এ DEVICE_ENROLLMENT_CODE-এর Value-এর সঙ্গে হুবহু মিলতে হবে।
+3. অ্যাপ নিজে একটি random device token তৈরি করে private app storage-এ রাখবে; token বা enrollment code source code-এ রাখা নেই।
+4. প্রথমবার register সফল হলে device ID ও token সংরক্ষণ হবে। পরেরবার একই বাটন চাপলে ping হবে।
+5. ফাইলের ওপর দীর্ঘক্ষণ চাপলে শুধু সাধারণ ফাইলের জন্য Delete confirmation দেখাবে। নিশ্চিত না করলে ফাইল মুছবে না। Folder recursive delete করা হয় না।
+
+নিরাপত্তা:
+- sb_secret/service_role key কখনো অ্যাপে বা GitHub-এ দেবেন না। Publishable key client-এ ব্যবহারের জন্য।
+- enrollment code শেয়ার করবেন না। আগে স্ক্রিনশটে দেখা গিয়ে থাকলে Supabase Secrets-এ নতুন value সেট করুন।
+- Delete এখন কেবল ফোনে ব্যবহারকারীর স্পষ্ট confirmation-এর পর স্থানীয় ফাইল মুছে। Server-side remote delete request/panel এই সংস্করণে এখনো চালু হয়নি; server থেকে অনুরোধ পেলেই স্বয়ংক্রিয়ভাবে মুছে ফেলার ব্যবস্থা ইচ্ছাকৃতভাবে নেই।
+- প্রথমবার Connect করতে ইন্টারনেট এবং All files access অনুমতি প্রয়োজন হতে পারে।
+
+GitHub:
 1. ZIP extract করুন।
-2. ভেতরের ফাইলগুলো আপনার FolderViewer repository-র root-এ একই path অনুযায়ী upload/replace করুন।
-3. .github/workflows/build-apk.yml-ও replace করুন।
-4. Commit changes করুন।
-5. Actions-এ FolderViewer-debug-apk artifact ডাউনলোড করুন।
-
-গুরুত্বপূর্ণ:
-- All files access খুব বিস্তৃত অনুমতি। শুধু নিজের পরীক্ষার ফোনে ব্যবহার করুন।
-- Android সেটিংসে অনুমতি চালু করার পর অ্যাপে ফিরে এলে ফাইল তালিকা দেখাবে।
-- এই ZIP-এ APK নেই; GitHub Actions দিয়ে build করার source code আছে।
-
-
-Supabase Connection Test build:
-- Adds a manual "সার্ভার কানেকশন পরীক্ষা" button.
-- Uses the project URL and publishable key supplied for this project.
-- It only sends a GET request to the devices table and does not create/delete files or rows.
-- If the request is blocked by API/RLS settings, the app will show the HTTP status.
-- Never replace the publishable key with a secret/service_role key.
+2. ভেতরের FolderViewer_AllFilesAccess ফোল্ডারের ফাইলগুলো repository root-এ একই path অনুযায়ী replace করুন।
+3. Commit changes করুন।
+4. Actions > Build Android APK workflow সফল হলে FolderViewer-debug-apk artifact ডাউনলোড করুন।
