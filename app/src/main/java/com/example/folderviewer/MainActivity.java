@@ -1,31 +1,37 @@
 package com.example.folderviewer;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
-import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
 import java.io.File;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.io.InputStream;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 
 public class MainActivity extends Activity {
     private LinearLayout root;
@@ -37,55 +43,144 @@ public class MainActivity extends Activity {
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
     private ArrayAdapter<String> adapter;
+    private SharedPreferences prefs;
+
+    private static final String SUPABASE_URL = "https://rvtqkldsapdtiocjygvc.supabase.co";
+    private static final String SUPABASE_PUBLISHABLE_KEY = "sb_publishable_OA3eukLqTY8BrL3lf5trwQ_apXWqXh-";
+    private static final String PREFS = "folder_viewer_device";
+    private static final String KEY_DEVICE_ID = "device_id";
+    private static final String KEY_DEVICE_TOKEN = "device_token";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         buildUi();
+        if (hasAllFilesAccess()) openDirectory(Environment.getExternalStorageDirectory());
+        else showPermissionNeeded();
+    }
 
-        if (hasAllFilesAccess()) {
-            openDirectory(Environment.getExternalStorageDirectory());
+    private void connectOrPing() {
+        if (prefs.contains(KEY_DEVICE_ID) && prefs.contains(KEY_DEVICE_TOKEN)) {
+            pingRegisteredDevice();
         } else {
-            showPermissionNeeded();
+            askEnrollmentCodeAndRegister();
         }
     }
 
-    // Publishable key is intended for client use; never put a Supabase secret/service_role key here.
-    private static final String SUPABASE_URL = "https://rvtqkldsapdtiocjygvc.supabase.co";
-    private static final String SUPABASE_PUBLISHABLE_KEY = "sb_publishable_OA3eukLqTY8BrL3lf5trwQ_apXWqXh-";
+    private void askEnrollmentCodeAndRegister() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("DEVICE_ENROLLMENT_CODE-এর Value");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        new AlertDialog.Builder(this)
+                .setTitle("প্রথমবার ডিভাইস নিবন্ধন")
+                .setMessage("Supabase Secrets-এ DEVICE_ENROLLMENT_CODE-এর যে Value সেট করেছেন, সেটি লিখুন। এটি কাউকে পাঠাবেন না।")
+                .setView(input)
+                .setNegativeButton("বাতিল", (d, w) -> { })
+                .setPositiveButton("নিবন্ধন", (d, w) -> {
+                    String enrollmentCode = input.getText().toString();
+                    if (enrollmentCode.trim().length() < 24) {
+                        statusView.setText("Enrollment code কমপক্ষে ২৪ অক্ষরের হতে হবে।");
+                        return;
+                    }
+                    String token = UUID.randomUUID().toString().replace("-", "")
+                            + UUID.randomUUID().toString().replace("-", "");
+                    setBusy(true, "ডিভাইস নিবন্ধন হচ্ছে...");
+                    new Thread(() -> {
+                        try {
+                            JSONObject body = new JSONObject();
+                            body.put("action", "register");
+                            body.put("device_name", Build.MANUFACTURER + " " + Build.MODEL + " - Folder Viewer");
+                            body.put("device_token", token);
+                            body.put("enrollment_code", enrollmentCode);
+                            JSONObject response = postToGateway(body);
+                            if (response.optBoolean("ok") && response.has("device_id")) {
+                                long id = response.getLong("device_id");
+                                prefs.edit().putLong(KEY_DEVICE_ID, id).putString(KEY_DEVICE_TOKEN, token).apply();
+                                runOnUiThread(() -> {
+                                    setBusy(false, "ডিভাইস নিবন্ধন সফল (ID: " + id + ")। এখন Ping করতে আবার বাটন চাপুন।");
+                                    Toast.makeText(this, "নিবন্ধন সফল", Toast.LENGTH_LONG).show();
+                                });
+                            } else {
+                                String error = response.optString("error", "অজানা ত্রুটি");
+                                runOnUiThread(() -> setBusy(false, "নিবন্ধন ব্যর্থ: " + error));
+                            }
+                        } catch (Exception e) {
+                            runOnUiThread(() -> setBusy(false, "নিবন্ধন ব্যর্থ। Function URL, API key ও নেটওয়ার্ক পরীক্ষা করুন।"));
+                        }
+                    }).start();
+                }).show();
+    }
 
-    private void testSupabaseConnection() {
-        connectButton.setEnabled(false);
-        statusView.setText("Supabase সংযোগ পরীক্ষা হচ্ছে...");
+    private void pingRegisteredDevice() {
+        long id = prefs.getLong(KEY_DEVICE_ID, -1);
+        String token = prefs.getString(KEY_DEVICE_TOKEN, "");
+        if (id < 1 || token.isEmpty()) {
+            prefs.edit().remove(KEY_DEVICE_ID).remove(KEY_DEVICE_TOKEN).apply();
+            askEnrollmentCodeAndRegister();
+            return;
+        }
+        setBusy(true, "সার্ভারে Ping পাঠানো হচ্ছে...");
         new Thread(() -> {
-            HttpURLConnection connection = null;
-            String message;
             try {
-                URL url = new URL(SUPABASE_URL + "/rest/v1/devices?select=id&limit=1");
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(10000);
-                connection.setReadTimeout(10000);
-                connection.setRequestProperty("apikey", SUPABASE_PUBLISHABLE_KEY);
-                connection.setRequestProperty("Authorization", "Bearer " + SUPABASE_PUBLISHABLE_KEY);
-                connection.setRequestProperty("Accept", "application/json");
-                int code = connection.getResponseCode();
-                if (code >= 200 && code < 300) {
-                    message = "Supabase সংযোগ সফল (HTTP " + code + ")। এখনো কোনো ফাইল রিকোয়েস্ট বা ডিলিট চালু নেই।";
+                JSONObject body = new JSONObject();
+                body.put("action", "ping");
+                body.put("device_id", id);
+                body.put("device_token", token);
+                JSONObject response = postToGateway(body);
+                if (response.optBoolean("ok")) {
+                    String name = response.optString("device_name", "Folder Viewer");
+                    runOnUiThread(() -> setBusy(false, "Ping সফল! " + name + " (ID: " + id + ")"));
                 } else {
-                    message = "Supabase উত্তর দিয়েছে, কিন্তু সংযোগ পরীক্ষা ব্যর্থ (HTTP " + code + ")। RLS/API সেটিংস পরীক্ষা করতে হবে।";
+                    String error = response.optString("error", "অজানা ত্রুটি");
+                    runOnUiThread(() -> setBusy(false, "Ping ব্যর্থ: " + error));
                 }
             } catch (Exception e) {
-                message = "সংযোগ করা যায়নি। ইন্টারনেট ও Project URL পরীক্ষা করুন।";
-            } finally {
-                if (connection != null) connection.disconnect();
+                runOnUiThread(() -> setBusy(false, "Ping ব্যর্থ। ইন্টারনেট বা Edge Function সেটিংস পরীক্ষা করুন।"));
             }
-            final String result = message;
-            runOnUiThread(() -> {
-                statusView.setText(result);
-                connectButton.setEnabled(true);
-            });
         }).start();
+    }
+
+    private JSONObject postToGateway(JSONObject body) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(SUPABASE_URL + "/functions/v1/device-gateway");
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(15000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("apikey", SUPABASE_PUBLISHABLE_KEY);
+            connection.setRequestProperty("Authorization", "Bearer " + SUPABASE_PUBLISHABLE_KEY);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Accept", "application/json");
+            byte[] bytes = body.toString().getBytes("UTF-8");
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream out = connection.getOutputStream()) { out.write(bytes); }
+            int code = connection.getResponseCode();
+            InputStream in = (code >= 200 && code < 400) ? connection.getInputStream() : connection.getErrorStream();
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            if (in != null) {
+                byte[] chunk = new byte[4096];
+                int n;
+                while ((n = in.read(chunk)) != -1) buffer.write(chunk, 0, n);
+                in.close();
+            }
+            String responseText = buffer.toString("UTF-8");
+            JSONObject response = new JSONObject(responseText);
+            if (code < 200 || code >= 300) {
+                if (!response.has("error")) response.put("error", "HTTP " + code);
+            }
+            return response;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void setBusy(boolean busy, String message) {
+        statusView.setText(message);
+        connectButton.setEnabled(!busy);
     }
 
     private boolean hasAllFilesAccess() {
@@ -105,7 +200,7 @@ public class MainActivity extends Activity {
         root.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("ফাইল ও ফোল্ডার দেখা যাবে। অ্যাপ থেকে ফাইল পরিবর্তন বা ডিলিট করা যাবে না।");
+        subtitle.setText("ফাইল ও ফোল্ডার দেখা, ফোনে নিশ্চিত করে ফাইল ডিলিট, এবং ম্যানুয়াল সার্ভার Ping।");
         subtitle.setTextSize(15);
         subtitle.setTextColor(0xFF555555);
         subtitle.setPadding(0, dp(6), 0, dp(12));
@@ -117,8 +212,8 @@ public class MainActivity extends Activity {
         root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
 
         connectButton = new Button(this);
-        connectButton.setText("সার্ভার কানেকশন পরীক্ষা");
-        connectButton.setOnClickListener(v -> testSupabaseConnection());
+        connectButton.setText("সার্ভার Connect / Ping");
+        connectButton.setOnClickListener(v -> connectOrPing());
         root.addView(connectButton, new LinearLayout.LayoutParams(-1, -2));
 
         pathView = new TextView(this);
@@ -132,6 +227,7 @@ public class MainActivity extends Activity {
         statusView.setTextColor(0xFF666666);
         statusView.setGravity(Gravity.CENTER);
         statusView.setPadding(0, dp(8), 0, dp(8));
+        statusView.setText("প্রথমবার সার্ভার Connect করতে বাটন চাপুন।");
         root.addView(statusView, new LinearLayout.LayoutParams(-1, -2));
 
         listView = new ListView(this);
@@ -142,14 +238,40 @@ public class MainActivity extends Activity {
         listView.setOnItemClickListener((parent, view, position, id) -> {
             if (position < 0 || position >= shownFiles.size()) return;
             File selected = shownFiles.get(position);
-            if (selected.isDirectory()) {
-                openDirectory(selected);
-            } else {
-                Toast.makeText(this, "শুধু দেখার জন্য: " + selected.getName(), Toast.LENGTH_SHORT).show();
-            }
+            if (selected.isDirectory()) openDirectory(selected);
+            else Toast.makeText(this, "দীর্ঘক্ষণ চাপলে ফাইল ডিলিটের অপশন আসবে", Toast.LENGTH_SHORT).show();
         });
-
+        listView.setOnItemLongClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= shownFiles.size()) return true;
+            File selected = shownFiles.get(position);
+            if (selected.isDirectory()) {
+                Toast.makeText(this, "নিরাপত্তার জন্য Folder ডিলিট অপশন নেই।", Toast.LENGTH_SHORT).show();
+            } else {
+                confirmDeleteFile(selected);
+            }
+            return true;
+        });
         setContentView(root);
+    }
+
+    private void confirmDeleteFile(File file) {
+        new AlertDialog.Builder(this)
+                .setTitle("ফাইল ডিলিট করবেন?")
+                .setMessage("এই ফাইলটি ফোন থেকে স্থায়ীভাবে মুছে যাবে:\n\n" + file.getAbsolutePath() + "\n\nএই কাজ ফিরিয়ে আনা নাও যেতে পারে।")
+                .setNegativeButton("বাতিল", (d, w) -> { })
+                .setPositiveButton("ডিলিট", (d, w) -> {
+                    if (!hasAllFilesAccess()) {
+                        Toast.makeText(this, "আগে ফাইল অ্যাক্সেস অনুমতি দিন।", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    boolean deleted = file.isFile() && file.delete();
+                    if (deleted) {
+                        Toast.makeText(this, "ফাইল ডিলিট হয়েছে", Toast.LENGTH_SHORT).show();
+                        openDirectory(currentDir);
+                    } else {
+                        Toast.makeText(this, "ফাইল ডিলিট করা যায়নি। অনুমতি বা ফাইলের অবস্থা পরীক্ষা করুন।", Toast.LENGTH_LONG).show();
+                    }
+                }).show();
     }
 
     private void requestAllFilesAccess() {
@@ -169,7 +291,7 @@ public class MainActivity extends Activity {
 
     private void showPermissionNeeded() {
         pathView.setText("স্টোরেজ: অনুমতি প্রয়োজন");
-        statusView.setText("ZArchiver-এর মতো Android-এর All files access সেটিংসে গিয়ে অনুমতি চালু করুন।");
+        statusView.setText("Android-এর All files access সেটিংসে গিয়ে অনুমতি চালু করুন।");
         permissionButton.setVisibility(View.VISIBLE);
         adapter.clear();
         shownFiles.clear();
@@ -181,44 +303,32 @@ public class MainActivity extends Activity {
         if (root != null) {
             if (hasAllFilesAccess()) {
                 permissionButton.setVisibility(View.GONE);
-                if (currentDir == null || !currentDir.exists()) {
-                    openDirectory(Environment.getExternalStorageDirectory());
-                } else {
-                    openDirectory(currentDir);
-                }
-            } else {
-                showPermissionNeeded();
-            }
+                if (currentDir == null || !currentDir.exists()) openDirectory(Environment.getExternalStorageDirectory());
+                else openDirectory(currentDir);
+            } else showPermissionNeeded();
         }
     }
 
     private void openDirectory(File directory) {
-        if (!hasAllFilesAccess()) {
-            showPermissionNeeded();
-            return;
-        }
+        if (!hasAllFilesAccess()) { showPermissionNeeded(); return; }
         if (directory == null || !directory.isDirectory() || !directory.canRead()) {
             statusView.setText("এই ফোল্ডারটি পড়া যাচ্ছে না।");
             return;
         }
-
         currentDir = directory;
         pathView.setText("বর্তমান ফোল্ডার: " + directory.getAbsolutePath());
         permissionButton.setVisibility(View.GONE);
         shownFiles.clear();
-
         File[] files = directory.listFiles();
         if (files == null) {
             adapter.clear();
             statusView.setText("ফাইল তালিকা পাওয়া যায়নি।");
             return;
         }
-
         Arrays.sort(files, (a, b) -> {
             if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
             return a.getName().compareToIgnoreCase(b.getName());
         });
-
         List<String> labels = new ArrayList<>();
         if (directory.getParentFile() != null) {
             shownFiles.add(directory.getParentFile());
@@ -228,25 +338,13 @@ public class MainActivity extends Activity {
             shownFiles.add(file);
             String label = file.isDirectory() ? "📁  " : "📄  ";
             label += file.getName();
-            if (file.isDirectory()) {
-                label += "/";
-            } else {
-                label += "   (" + readableSize(file.length()) + ")";
-            }
+            if (file.isDirectory()) label += "/";
+            else label += "   (" + readableSize(file.length()) + ")";
             labels.add(label);
         }
         adapter.clear();
         adapter.addAll(labels);
         statusView.setText(files.length + " টি আইটেম");
-        listView.setOnItemClickListener((parent, view, position, id) -> {
-            if (position < 0 || position >= shownFiles.size()) return;
-            File selected = shownFiles.get(position);
-            if (selected.isDirectory()) {
-                openDirectory(selected);
-            } else {
-                Toast.makeText(this, "শুধু দেখার জন্য: " + selected.getName(), Toast.LENGTH_SHORT).show();
-            }
-        });
     }
 
     private String readableSize(long size) {
@@ -258,11 +356,8 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (currentDir != null && currentDir.getParentFile() != null && hasAllFilesAccess()) {
-            openDirectory(currentDir.getParentFile());
-        } else {
-            super.onBackPressed();
-        }
+        if (currentDir != null && currentDir.getParentFile() != null && hasAllFilesAccess()) openDirectory(currentDir.getParentFile());
+        else super.onBackPressed();
     }
 
     private int dp(int value) {
