@@ -26,19 +26,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # IMPORTANT: Do not use android-actions/setup-android here.
-      # It is attempting to install the removed SDK package named "tools".
-      - name: Locate preinstalled Android SDK
+      - name: Locate Android SDK
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-          test -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT}}" 
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
+          echo "Using Android SDK at: ${SDK_ROOT}"
+          test -n "${SDK_ROOT}"
+          test -d "${SDK_ROOT}"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
 
       - name: Accept Android SDK licenses
-        run: yes | "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+        run: |
+          SDKMANAGER="$(find "${ANDROID_HOME:-${ANDROID_SDK_ROOT}}" -type f -name sdkmanager | head -n 1)"
+          echo "Using sdkmanager: ${SDKMANAGER}"
+          test -x "${SDKMANAGER}"
+          yes | "${SDKMANAGER}" --licenses
 
       - name: Install required Android SDK packages
-        run: "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+        run: |
+          SDKMANAGER="$(find "${ANDROID_HOME:-${ANDROID_SDK_ROOT}}" -type f -name sdkmanager | head -n 1)"
+          "${SDKMANAGER}" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
