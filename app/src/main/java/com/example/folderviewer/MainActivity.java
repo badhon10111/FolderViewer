@@ -40,6 +40,7 @@ public class MainActivity extends Activity {
     private ListView listView;
     private Button permissionButton;
     private Button connectButton;
+    private Button requestsButton;
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
     private ArrayAdapter<String> adapter;
@@ -142,6 +143,174 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+
+    private void checkServerRequests() {
+        if (!prefs.contains(KEY_DEVICE_ID) || !prefs.contains(KEY_DEVICE_TOKEN)) {
+            statusView.setText("আগে সার্ভার Connect / Ping করে ডিভাইস নিবন্ধন করুন।");
+            return;
+        }
+        long id = prefs.getLong(KEY_DEVICE_ID, -1);
+        String token = prefs.getString(KEY_DEVICE_TOKEN, "");
+        setBusy(true, "সার্ভারের অনুরোধ দেখা হচ্ছে...");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("action", "poll_requests");
+                body.put("device_id", id);
+                body.put("device_token", token);
+                JSONObject response = postToGateway(body);
+                if (!response.optBoolean("ok")) {
+                    String error = response.optString("error", "অজানা ত্রুটি");
+                    runOnUiThread(() -> setBusy(false, "অনুরোধ পাওয়া যায়নি: " + error));
+                    return;
+                }
+                org.json.JSONArray requests = response.optJSONArray("requests");
+                runOnUiThread(() -> {
+                    setBusy(false, "সার্ভার অনুরোধ পরীক্ষা সম্পন্ন।");
+                    if (requests == null || requests.length() == 0) {
+                        new AlertDialog.Builder(this)
+                            .setTitle("সার্ভারের অনুরোধ")
+                            .setMessage("এখন কোনো অপেক্ষমাণ অনুরোধ নেই।")
+                            .setPositiveButton("ঠিক আছে", null).show();
+                    } else {
+                        showRequestAt(requests, 0);
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> setBusy(false, "অনুরোধ পরীক্ষা ব্যর্থ। নেটওয়ার্ক/Function দেখুন।"));
+            }
+        }).start();
+    }
+
+    private void showRequestAt(org.json.JSONArray requests, int index) {
+        if (index >= requests.length()) {
+            statusView.setText("সার্ভারের সব অনুরোধ দেখা হয়েছে।");
+            return;
+        }
+        JSONObject request = requests.optJSONObject(index);
+        if (request == null) { showRequestAt(requests, index + 1); return; }
+        long requestId = request.optLong("id", -1);
+        String action = request.optString("action", "");
+        JSONObject payload = request.optJSONObject("request_payload");
+        String requestedPath = payload == null ? "" : payload.optString("path", "");
+        if ("list_files".equals(action)) {
+            new AlertDialog.Builder(this)
+                .setTitle("ফাইল তালিকার অনুরোধ")
+                .setMessage("সার্ভার এই ফোল্ডারের ফাইলের নাম ও আকার দেখতে চায়:\n\n"
+                    + (requestedPath.isEmpty() ? "বর্তমান ফোল্ডার" : requestedPath)
+                    + "\n\nতালিকা পাঠালে ফাইলের নাম ও আকার সার্ভারে যাবে। অনুমতি দেবেন?")
+                .setNegativeButton("না", (d, w) -> submitRequestResult(requestId, "rejected", new JSONObject(), () -> showRequestAt(requests, index + 1)))
+                .setPositiveButton("অনুমতি দিন", (d, w) -> sendRequestedFileList(requestId, requestedPath, () -> showRequestAt(requests, index + 1)))
+                .setOnCancelListener(d -> showRequestAt(requests, index + 1))
+                .show();
+        } else if ("delete_file".equals(action)) {
+            new AlertDialog.Builder(this)
+                .setTitle("সার্ভার ফাইল ডিলিট করতে বলেছে")
+                .setMessage("সার্ভার অনুরোধ করেছে, কিন্তু আপনার অনুমতি ছাড়া কিছু ডিলিট হবে না:\n\n"
+                    + requestedPath + "\n\nএই ফাইলটি স্থায়ীভাবে মুছবেন?")
+                .setNegativeButton("বাতিল / ডিলিট নয়", (d, w) -> submitRequestResult(requestId, "rejected", new JSONObject(), () -> showRequestAt(requests, index + 1)))
+                .setPositiveButton("ফাইল ডিলিট করুন", (d, w) -> approveAndDeleteRequestedFile(requestId, requestedPath, () -> showRequestAt(requests, index + 1)))
+                .setOnCancelListener(d -> showRequestAt(requests, index + 1))
+                .show();
+        } else {
+            submitRequestResult(requestId, "failed", resultObject("error", "Unknown request action"), () -> showRequestAt(requests, index + 1));
+        }
+    }
+
+    private void sendRequestedFileList(long requestId, String requestedPath, Runnable done) {
+        if (!hasAllFilesAccess()) {
+            Toast.makeText(this, "আগে All files access অনুমতি দিন।", Toast.LENGTH_LONG).show();
+            submitRequestResult(requestId, "failed", resultObject("error", "Storage permission missing"), done);
+            return;
+        }
+        File target = requestedPath.isEmpty() ? currentDir : new File(requestedPath);
+        if (target == null || !target.isDirectory() || !target.canRead()) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Folder unavailable"), done);
+            return;
+        }
+        File[] files = target.listFiles();
+        org.json.JSONArray items = new org.json.JSONArray();
+        if (files != null) {
+            Arrays.sort(files, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+            for (File f : files) {
+                JSONObject item = new JSONObject();
+                try {
+                    item.put("name", f.getName());
+                    item.put("path", f.getAbsolutePath());
+                    item.put("directory", f.isDirectory());
+                    if (f.isFile()) item.put("size_bytes", f.length());
+                    items.put(item);
+                } catch (Exception ignored) {}
+            }
+        }
+        JSONObject result = new JSONObject();
+        try {
+            result.put("path", target.getAbsolutePath());
+            result.put("items", items);
+        } catch (Exception ignored) {}
+        submitRequestResult(requestId, "completed", result, () -> {
+            statusView.setText("অনুমোদিত ফাইল তালিকা সার্ভারে পাঠানো হয়েছে।");
+            done.run();
+        });
+    }
+
+    private void approveAndDeleteRequestedFile(long requestId, String requestedPath, Runnable done) {
+        if (!hasAllFilesAccess()) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Storage permission missing"), done);
+            return;
+        }
+        File target = new File(requestedPath);
+        String rootPath = Environment.getExternalStorageDirectory().getAbsolutePath();
+        try {
+            String canonicalRoot = new File(rootPath).getCanonicalPath();
+            String canonicalTarget = target.getCanonicalPath();
+            if (!canonicalTarget.startsWith(canonicalRoot + File.separator) || target.isDirectory() || !target.isFile()) {
+                submitRequestResult(requestId, "failed", resultObject("error", "Only a regular file inside shared storage can be deleted"), done);
+                return;
+            }
+            new AlertDialog.Builder(this)
+                .setTitle("শেষবার নিশ্চিত করুন")
+                .setMessage("শুধু এই ফাইলটি মুছবে:\n\n" + canonicalTarget)
+                .setNegativeButton("না", (d, w) -> submitRequestResult(requestId, "rejected", new JSONObject(), done))
+                .setPositiveButton("স্থায়ীভাবে ডিলিট", (d, w) -> {
+                    boolean deleted = target.delete();
+                    JSONObject result = resultObject("path", canonicalTarget);
+                    try { result.put("deleted", deleted); } catch (Exception ignored) {}
+                    submitRequestResult(requestId, deleted ? "completed" : "failed", result, () -> {
+                        if (deleted) openDirectory(currentDir);
+                        done.run();
+                    });
+                }).show();
+        } catch (Exception e) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Invalid file path"), done);
+        }
+    }
+
+    private JSONObject resultObject(String key, String value) {
+        JSONObject result = new JSONObject();
+        try { result.put(key, value); } catch (Exception ignored) {}
+        return result;
+    }
+
+    private void submitRequestResult(long requestId, String status, JSONObject result, Runnable done) {
+        if (requestId <= 0) { done.run(); return; }
+        long deviceId = prefs.getLong(KEY_DEVICE_ID, -1);
+        String token = prefs.getString(KEY_DEVICE_TOKEN, "");
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("action", "complete_request");
+                body.put("device_id", deviceId);
+                body.put("device_token", token);
+                body.put("request_id", requestId);
+                body.put("status", status);
+                body.put("result_payload", result);
+                postToGateway(body);
+            } catch (Exception ignored) {}
+            runOnUiThread(done);
+        }).start();
+    }
+
     private JSONObject postToGateway(JSONObject body) throws Exception {
         HttpURLConnection connection = null;
         try {
@@ -181,6 +350,7 @@ public class MainActivity extends Activity {
     private void setBusy(boolean busy, String message) {
         statusView.setText(message);
         connectButton.setEnabled(!busy);
+        if (requestsButton != null) requestsButton.setEnabled(!busy);
     }
 
     private boolean hasAllFilesAccess() {
@@ -215,6 +385,11 @@ public class MainActivity extends Activity {
         connectButton.setText("সার্ভার Connect / Ping");
         connectButton.setOnClickListener(v -> connectOrPing());
         root.addView(connectButton, new LinearLayout.LayoutParams(-1, -2));
+
+        requestsButton = new Button(this);
+        requestsButton.setText("সার্ভারের অনুরোধ দেখুন");
+        requestsButton.setOnClickListener(v -> checkServerRequests());
+        root.addView(requestsButton, new LinearLayout.LayoutParams(-1, -2));
 
         pathView = new TextView(this);
         pathView.setTextSize(13);
