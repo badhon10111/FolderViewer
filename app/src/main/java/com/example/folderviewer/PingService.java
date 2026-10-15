@@ -7,6 +7,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.location.LocationManager;
+import android.provider.Settings;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -124,7 +126,7 @@ public class PingService extends Service {
             attempts = 0;
             if (!online && allowImmediatePing) attemptPing(false);
             else if (!online && !pingInProgress) attemptPing(false);
-            else if (online) schedulePeriodic();
+            else if (online && periodicRunnable == null) schedulePeriodic();
         } else if (hasInternetNetwork) {
             setOnline(false, "Wi-Fi/ডাটা আছে, কিন্তু ইন্টারনেট যাচাই হয়নি");
             cancelPeriodic();
@@ -209,12 +211,22 @@ public class PingService extends Service {
                 if (requests == null) return;
                 for (int i = 0; i < requests.length(); i++) {
                     JSONObject request = requests.optJSONObject(i);
-                    if (request == null || !"ping_test".equals(request.optString("action", ""))) continue;
+                    if (request == null) continue;
+                    String action = request.optString("action", "");
+                    if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
                     long requestId = request.optLong("id", -1);
                     if (requestId <= 0) continue;
                     JSONObject result = new JSONObject();
-                    result.put("online", true);
-                    result.put("response", "pong");
+                    if ("ping_test".equals(action)) {
+                        result.put("online", true);
+                        result.put("response", "pong");
+                        result.put("message", "Phone background service responded");
+                    } else {
+                        boolean enabled = isDeviceLocationEnabled();
+                        result.put("location_enabled", enabled);
+                        result.put("status", enabled ? "enabled" : "disabled");
+                        result.put("message", enabled ? "ডিভাইসের Location চালু আছে" : "ডিভাইসের Location বন্ধ আছে");
+                    }
                     result.put("responded_at", java.time.Instant.now().toString());
                     result.put("source", "background_ping_service");
                     JSONObject complete = new JSONObject();
@@ -230,6 +242,20 @@ public class PingService extends Service {
                 Log.w(TAG, "Ping-test request polling failed", e);
             }
         });
+    }
+
+    private boolean isDeviceLocationEnabled() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                LocationManager manager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                return manager != null && manager.isLocationEnabled();
+            }
+            return Settings.Secure.getInt(getContentResolver(), Settings.Secure.LOCATION_MODE,
+                    Settings.Secure.LOCATION_MODE_OFF) != Settings.Secure.LOCATION_MODE_OFF;
+        } catch (Exception e) {
+            Log.w(TAG, "Could not read location setting", e);
+            return false;
+        }
     }
 
     private void scheduleRequestPoll(long deviceId, String token) {
@@ -283,8 +309,11 @@ public class PingService extends Service {
         cancelPeriodic();
         periodicRunnable = () -> {
             periodicRunnable = null;
-            evaluateNetwork(false);
-            if (online && !pingInProgress) attemptPing(false);
+            if (online && !pingInProgress) {
+                attemptPing(false);
+            } else {
+                evaluateNetwork(false);
+            }
         };
         handler.postDelayed(periodicRunnable, PING_INTERVAL_MS);
     }
