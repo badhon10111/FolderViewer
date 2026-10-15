@@ -10,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
+import android.content.IntentSender;
 import android.os.Looper;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -26,6 +27,14 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
+
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.LocationSettingsRequest;
+import com.google.android.gms.location.LocationSettingsResponse;
+import com.google.android.gms.location.Priority;
+import com.google.android.gms.common.api.ResolvableApiException;
+import com.google.android.gms.tasks.Task;
 
 import java.io.File;
 import java.io.InputStream;
@@ -49,6 +58,7 @@ public class MainActivity extends Activity {
     private Button requestsButton;
     private LocationManager locationManager;
     private static final int LOCATION_PERMISSION_REQUEST = 7401;
+    private static final int LOCATION_SETTINGS_REQUEST = 7402;
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
     private ArrayAdapter<String> adapter;
@@ -246,7 +256,7 @@ public class MainActivity extends Activity {
             }, LOCATION_PERMISSION_REQUEST);
             return;
         }
-        fetchOneShotLocation(requestId, done);
+        ensureLocationSettings(requestId, done);
     }
 
     private long pendingLocationRequestId = -1;
@@ -269,7 +279,74 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "লোকেশন অনুমতি দেওয়া হয়নি।", Toast.LENGTH_LONG).show();
             return;
         }
-        fetchOneShotLocation(requestId, done);
+        ensureLocationSettings(requestId, done);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != LOCATION_SETTINGS_REQUEST) return;
+        long requestId = pendingLocationRequestId;
+        Runnable done = pendingLocationDone == null ? () -> {} : pendingLocationDone;
+        pendingLocationRequestId = -1;
+        pendingLocationDone = null;
+        if (resultCode == RESULT_OK) {
+            fetchOneShotLocation(requestId, done);
+        } else {
+            submitRequestResult(requestId, "rejected", resultObject("error", "User declined enabling device location settings"), () -> {
+                setBusy(false, "Location চালু করা হয়নি; লোকেশন নেওয়া হয়নি।");
+                Toast.makeText(MainActivity.this, "Location চালু করা হয়নি।", Toast.LENGTH_LONG).show();
+                done.run();
+            });
+        }
+    }
+
+    private void ensureLocationSettings(long requestId, Runnable done) {
+        if (!hasLocationPermission()) {
+            submitRequestResult(requestId, "rejected", resultObject("error", "Location permission missing"), done);
+            return;
+        }
+        pendingLocationRequestId = requestId;
+        pendingLocationDone = done;
+        setBusy(true, "ফোনের Location সেটিংস যাচাই হচ্ছে...");
+        LocationRequest locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000L)
+                .setMinUpdateIntervalMillis(5000L)
+                .build();
+        LocationSettingsRequest settingsRequest = new LocationSettingsRequest.Builder()
+                .addLocationRequest(locationRequest)
+                .setAlwaysShow(true)
+                .build();
+        Task<LocationSettingsResponse> task = LocationServices.getSettingsClient(this)
+                .checkLocationSettings(settingsRequest);
+        task.addOnSuccessListener(response -> {
+            long id = pendingLocationRequestId;
+            Runnable callback = pendingLocationDone == null ? () -> {} : pendingLocationDone;
+            pendingLocationRequestId = -1;
+            pendingLocationDone = null;
+            fetchOneShotLocation(id, callback);
+        });
+        task.addOnFailureListener(error -> {
+            if (error instanceof ResolvableApiException) {
+                try {
+                    ((ResolvableApiException) error).startResolutionForResult(MainActivity.this, LOCATION_SETTINGS_REQUEST);
+                } catch (IntentSender.SendIntentException e) {
+                    clearPendingLocationAndFail("Unable to open Location settings prompt", done);
+                }
+            } else {
+                clearPendingLocationAndFail("Location settings cannot be resolved on this device", done);
+                Toast.makeText(MainActivity.this, "এই ফোনে Location সেটিংস ডায়ালগ দেখানো যায়নি।", Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void clearPendingLocationAndFail(String message, Runnable done) {
+        long id = pendingLocationRequestId;
+        pendingLocationRequestId = -1;
+        pendingLocationDone = null;
+        submitRequestResult(id, "failed", resultObject("error", message), () -> {
+            setBusy(false, "Location সেটিংস যাচাই করা যায়নি।");
+            done.run();
+        });
     }
 
     private boolean hasLocationPermission() {
