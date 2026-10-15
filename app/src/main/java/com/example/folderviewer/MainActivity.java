@@ -54,7 +54,6 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private ListView listView;
     private Button permissionButton;
-    private Button connectButton;
     private Button requestsButton;
     private LocationManager locationManager;
     private static final int LOCATION_PERMISSION_REQUEST = 7401;
@@ -78,14 +77,23 @@ public class MainActivity extends Activity {
         buildUi();
         if (hasAllFilesAccess()) openDirectory(Environment.getExternalStorageDirectory());
         else showPermissionNeeded();
+        if (prefs.contains(KEY_DEVICE_ID) && prefs.contains(KEY_DEVICE_TOKEN)) {
+            startPingService();
+        } else {
+            new AlertDialog.Builder(this)
+                    .setTitle("প্রথমবার সার্ভার নিবন্ধন")
+                    .setMessage("স্বয়ংক্রিয় অনলাইন/অফলাইন অবস্থা চালু করতে একবার ডিভাইস নিবন্ধন করতে হবে।")
+                    .setNegativeButton("পরে", (d, w) -> { })
+                    .setPositiveButton("নিবন্ধন করুন", (d, w) -> askEnrollmentCodeAndRegister())
+                    .show();
+        }
     }
 
-    private void connectOrPing() {
-        if (prefs.contains(KEY_DEVICE_ID) && prefs.contains(KEY_DEVICE_TOKEN)) {
-            pingRegisteredDevice();
-        } else {
-            askEnrollmentCodeAndRegister();
-        }
+    private void startPingService() {
+        if (!prefs.contains(KEY_DEVICE_ID) || !prefs.contains(KEY_DEVICE_TOKEN)) return;
+        Intent intent = new Intent(this, PingService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent);
+        else startService(intent);
     }
 
     private void askEnrollmentCodeAndRegister() {
@@ -119,8 +127,9 @@ public class MainActivity extends Activity {
                                 long id = response.getLong("device_id");
                                 prefs.edit().putLong(KEY_DEVICE_ID, id).putString(KEY_DEVICE_TOKEN, token).apply();
                                 runOnUiThread(() -> {
-                                    setBusy(false, "ডিভাইস নিবন্ধন সফল (ID: " + id + ")। এখন Ping করতে আবার বাটন চাপুন।");
-                                    Toast.makeText(this, "নিবন্ধন সফল", Toast.LENGTH_LONG).show();
+                                    setBusy(false, "ডিভাইস নিবন্ধন সফল (ID: " + id + ")। স্বয়ংক্রিয় ব্যাকগ্রাউন্ড Ping চালু হচ্ছে।");
+                                    startPingService();
+                                    Toast.makeText(this, "নিবন্ধন সফল — অটো Ping চালু", Toast.LENGTH_LONG).show();
                                 });
                             } else {
                                 String error = response.optString("error", "অজানা ত্রুটি");
@@ -133,39 +142,9 @@ public class MainActivity extends Activity {
                 }).show();
     }
 
-    private void pingRegisteredDevice() {
-        long id = prefs.getLong(KEY_DEVICE_ID, -1);
-        String token = prefs.getString(KEY_DEVICE_TOKEN, "");
-        if (id < 1 || token.isEmpty()) {
-            prefs.edit().remove(KEY_DEVICE_ID).remove(KEY_DEVICE_TOKEN).apply();
-            askEnrollmentCodeAndRegister();
-            return;
-        }
-        setBusy(true, "সার্ভারে Ping পাঠানো হচ্ছে...");
-        new Thread(() -> {
-            try {
-                JSONObject body = new JSONObject();
-                body.put("action", "ping");
-                body.put("device_id", id);
-                body.put("device_token", token);
-                JSONObject response = postToGateway(body);
-                if (response.optBoolean("ok")) {
-                    String name = response.optString("device_name", "Folder Viewer");
-                    runOnUiThread(() -> setBusy(false, "Ping সফল! " + name + " (ID: " + id + ")"));
-                } else {
-                    String error = response.optString("error", "অজানা ত্রুটি");
-                    runOnUiThread(() -> setBusy(false, "Ping ব্যর্থ: " + error));
-                }
-            } catch (Exception e) {
-                runOnUiThread(() -> setBusy(false, "Ping ব্যর্থ। ইন্টারনেট বা Edge Function সেটিংস পরীক্ষা করুন।"));
-            }
-        }).start();
-    }
-
-
     private void checkServerRequests() {
         if (!prefs.contains(KEY_DEVICE_ID) || !prefs.contains(KEY_DEVICE_TOKEN)) {
-            statusView.setText("আগে সার্ভার Connect / Ping করে ডিভাইস নিবন্ধন করুন।");
+            statusView.setText("আগে একবার ডিভাইস নিবন্ধন করুন, তারপর অটো Ping চলবে।");
             return;
         }
         long id = prefs.getLong(KEY_DEVICE_ID, -1);
@@ -563,7 +542,6 @@ public class MainActivity extends Activity {
 
     private void setBusy(boolean busy, String message) {
         statusView.setText(message);
-        connectButton.setEnabled(!busy);
         if (requestsButton != null) requestsButton.setEnabled(!busy);
     }
 
@@ -584,7 +562,7 @@ public class MainActivity extends Activity {
         root.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("ফাইল ও ফোল্ডার দেখা, ফোনে নিশ্চিত করে ফাইল ডিলিট, এবং ম্যানুয়াল সার্ভার Ping।");
+        subtitle.setText("ফাইল ও ফোল্ডার দেখা, ফোনে নিশ্চিত করে ফাইল ডিলিট, এবং স্বয়ংক্রিয় ব্যাকগ্রাউন্ড সার্ভার সংযোগ।");
         subtitle.setTextSize(15);
         subtitle.setTextColor(0xFF555555);
         subtitle.setPadding(0, dp(6), 0, dp(12));
@@ -595,10 +573,6 @@ public class MainActivity extends Activity {
         permissionButton.setOnClickListener(v -> requestAllFilesAccess());
         root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
 
-        connectButton = new Button(this);
-        connectButton.setText("সার্ভার Connect / Ping");
-        connectButton.setOnClickListener(v -> connectOrPing());
-        root.addView(connectButton, new LinearLayout.LayoutParams(-1, -2));
 
         requestsButton = new Button(this);
         requestsButton.setText("সার্ভারের অনুরোধ দেখুন");
@@ -616,7 +590,7 @@ public class MainActivity extends Activity {
         statusView.setTextColor(0xFF666666);
         statusView.setGravity(Gravity.CENTER);
         statusView.setPadding(0, dp(8), 0, dp(8));
-        statusView.setText("প্রথমবার সার্ভার Connect করতে বাটন চাপুন।");
+        statusView.setText("সার্ভার সংযোগ স্বয়ংক্রিয়ভাবে চালু হবে।");
         root.addView(statusView, new LinearLayout.LayoutParams(-1, -2));
 
         listView = new ListView(this);
