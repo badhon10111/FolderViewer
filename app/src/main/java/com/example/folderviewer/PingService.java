@@ -37,6 +37,7 @@ public class PingService extends Service {
     private static final String KEY_DEVICE_ID = "device_id";
     private static final String KEY_DEVICE_TOKEN = "device_token";
     private static final long PING_INTERVAL_MS = 120_000L;
+    private static final long REQUEST_POLL_INTERVAL_MS = 15_000L;
     private static final long RETRY_INTERVAL_MS = 10_000L;
     private static final int MAX_ATTEMPTS = 5;
 
@@ -51,6 +52,7 @@ public class PingService extends Service {
     private long runId = 0;
     private Network lastNetwork;
     private Runnable periodicRunnable;
+    private Runnable requestPollRunnable;
     private Runnable retryRunnable;
 
     @Override public void onCreate() {
@@ -82,6 +84,7 @@ public class PingService extends Service {
                 handler.post(() -> {
                     setOnline(false, "ইন্টারনেট সংযোগ নেই");
                     cancelPeriodic();
+                    cancelRequestPoll();
                     resetRetryState();
                 });
             }
@@ -125,6 +128,7 @@ public class PingService extends Service {
         } else if (hasInternetNetwork) {
             setOnline(false, "Wi-Fi/ডাটা আছে, কিন্তু ইন্টারনেট যাচাই হয়নি");
             cancelPeriodic();
+            cancelRequestPoll();
             if (!retryExhausted && !pingInProgress && retryRunnable == null) {
                 attempts = 0;
                 attemptPing(true);
@@ -132,6 +136,7 @@ public class PingService extends Service {
         } else {
             setOnline(false, "ইন্টারনেট সংযোগ নেই — সংযোগ ফিরলে আবার চেষ্টা হবে");
             cancelPeriodic();
+            cancelRequestPoll();
         }
     }
 
@@ -172,6 +177,8 @@ public class PingService extends Service {
                     attempts = 0;
                     retryExhausted = false;
                     setOnline(true, "অনলাইন — অটো Ping চালু");
+                    pollPingTestRequests(id, token);
+                    scheduleRequestPoll(id, token);
                     schedulePeriodic();
                 } else {
                     setOnline(false, "Ping ব্যর্থ: " + resultMessage);
@@ -187,6 +194,57 @@ public class PingService extends Service {
                 }
             });
         });
+    }
+
+    private void pollPingTestRequests(long deviceId, String token) {
+        executor.execute(() -> {
+            try {
+                JSONObject poll = new JSONObject();
+                poll.put("action", "poll_requests");
+                poll.put("device_id", deviceId);
+                poll.put("device_token", token);
+                JSONObject response = postToGateway(poll);
+                if (!response.optBoolean("ok", false)) return;
+                org.json.JSONArray requests = response.optJSONArray("requests");
+                if (requests == null) return;
+                for (int i = 0; i < requests.length(); i++) {
+                    JSONObject request = requests.optJSONObject(i);
+                    if (request == null || !"ping_test".equals(request.optString("action", ""))) continue;
+                    long requestId = request.optLong("id", -1);
+                    if (requestId <= 0) continue;
+                    JSONObject result = new JSONObject();
+                    result.put("online", true);
+                    result.put("response", "pong");
+                    result.put("responded_at", java.time.Instant.now().toString());
+                    result.put("source", "background_ping_service");
+                    JSONObject complete = new JSONObject();
+                    complete.put("action", "complete_request");
+                    complete.put("device_id", deviceId);
+                    complete.put("device_token", token);
+                    complete.put("request_id", requestId);
+                    complete.put("status", "completed");
+                    complete.put("result_payload", result);
+                    postToGateway(complete);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Ping-test request polling failed", e);
+            }
+        });
+    }
+
+    private void scheduleRequestPoll(long deviceId, String token) {
+        if (requestPollRunnable != null) handler.removeCallbacks(requestPollRunnable);
+        requestPollRunnable = () -> {
+            requestPollRunnable = null;
+            if (online) pollPingTestRequests(deviceId, token);
+            if (online) scheduleRequestPoll(deviceId, token);
+        };
+        handler.postDelayed(requestPollRunnable, REQUEST_POLL_INTERVAL_MS);
+    }
+
+    private void cancelRequestPoll() {
+        if (requestPollRunnable != null) handler.removeCallbacks(requestPollRunnable);
+        requestPollRunnable = null;
     }
 
     private JSONObject postToGateway(JSONObject body) throws Exception {
@@ -286,6 +344,7 @@ public class PingService extends Service {
 
     @Override public void onDestroy() {
         cancelPeriodic();
+        cancelRequestPoll();
         if (retryRunnable != null) handler.removeCallbacks(retryRunnable);
         if (connectivityManager != null && networkCallback != null) {
             try { connectivityManager.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) { }
