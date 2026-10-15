@@ -1,0 +1,46 @@
+Folder Viewer — ওয়েব প্যানেল Ping Test
+
+এই আপডেটে:
+- ওয়েব প্যানেলে “Ping পরীক্ষা / ফোনের রেসপন্স” বোতাম।
+- সার্ভার device_requests-এ ping_test অনুরোধ রাখে।
+- Android-এর PingService অনলাইনে থাকলে প্রতি ১৫ সেকেন্ডে request queue পরীক্ষা করে।
+- ping_test পেলে ফোন complete_request দিয়ে pong / online=true পাঠায়।
+- ২ মিনিটে ফোনের উত্তর না এলে প্যানেল সেটিকে failed/Offline দেখায়; আর “ফোনের উত্তরের অপেক্ষায়” আটকে থাকে না।
+- নিয়মিত Ping timer network callback-এ বারবার reset হয় না; সফল Ping-এর পর থেকে প্রতি ২ মিনিটে পুনরায় Ping পাঠায়।
+- নতুন “ফোনের Location ON/OFF চেক” বোতাম ডিভাইসের Location setting চালু/বন্ধ কিনা জানায়; GPS location নেয় না।
+- Online status-এ ৪ মিনিটের tolerance রাখা হয়েছে, যাতে Android scheduling jitter-এর কারণে ২ মিনিটের মাঝের সামান্য দেরিতে ভুল Offline না দেখায়।
+- পূর্বের ডিভাইস ডিলিট UI/handler-ও ZIP-এ রাখা হয়েছে।
+
+কোথায় কী বসাতে হবে:
+1) Supabase Dashboard → SQL Editor → New query-তে নিচের SQL একবার Run করো।
+2) Supabase Dashboard → Edge Functions → admin-gateway → index.ts-এ ZIP-এর work_folderviewer/supabase/admin-gateway/index.ts-এর সম্পূর্ণ কোড বসিয়ে Deploy করো।
+3) GitHub-এর FolderViewer-Web repo-তে ZIP-এর work_folderviewer/FolderViewer-Web/index.html আপলোড করে পুরোনো index.html replace করো।
+4) Android repo badhon10111/FolderViewer-এ ZIP-এর work_folderviewer/app/ ফাইলগুলো আপডেট করে GitHub Actions থেকে নতুন APK build করো।
+5) নতুন APK ফোনে install/update করো। ফোনে অ্যাপ নিবন্ধিত এবং Background Ping service চলমান থাকতে হবে।
+6) ওয়েব প্যানেলে লগইন করে ডিভাইসের “Ping পরীক্ষা / ফোনের রেসপন্স” চাপো। ফোন অনলাইন থাকলে প্রায় ১৫ সেকেন্ডের মধ্যে অনুরোধ ধরার কথা। এরপর Refresh করো।
+
+একবার চালানোর SQL:
+
+alter table public.device_requests
+drop constraint if exists device_requests_action_check;
+
+alter table public.device_requests
+add constraint device_requests_action_check
+check (
+  action = any (
+    array[
+      'list_files'::text,
+      'delete_file'::text,
+      'get_location'::text,
+      'ping_test'::text,
+      'check_location_status'::text
+    ]
+  )
+);
+
+সতর্কতা:
+- SQL চালানোর আগে টেবিলে অন্য custom action থাকলে সেগুলোকেও array-তে যোগ করবে; না হলে সেই action-গুলো constraint-এ আটকে যেতে পারে।
+- ফোন Offline, Force stop করা, service বন্ধ বা নেটওয়ার্ক বিচ্ছিন্ন হলে সঙ্গে সঙ্গে response আসবে না। তখন request pending থাকবে।
+- এটি একটি server-queued device response test; শুধু last_seen timestamp পড়া নয়।
+- Supabase Secret key কখনো ওয়েব HTML বা Android APK-তে রাখবে না।
+- ZIP-এর source পরিবর্তন ও integrity যাচাই করা হয়েছে; এখানে Android APK build বা বাস্তব ফোনে end-to-end test করা হয়নি।

@@ -1,0 +1,1 @@
+Ping Test আপডেটের নির্দেশনা: SETUP_Ping_Test_BN.txt পড়ুন। প্রথমে SQL একবার চালান, তারপর admin-gateway deploy, web index.html replace, Android source update এবং নতুন APK install করুন।
