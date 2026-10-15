@@ -5,6 +5,12 @@ import android.app.AlertDialog;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Looper;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
@@ -41,6 +47,8 @@ public class MainActivity extends Activity {
     private Button permissionButton;
     private Button connectButton;
     private Button requestsButton;
+    private LocationManager locationManager;
+    private static final int LOCATION_PERMISSION_REQUEST = 7401;
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
     private ArrayAdapter<String> adapter;
@@ -56,6 +64,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        locationManager = (LocationManager) getSystemService(LOCATION_SERVICE);
         buildUi();
         if (hasAllFilesAccess()) openDirectory(Environment.getExternalStorageDirectory());
         else showPermissionNeeded();
@@ -193,7 +202,15 @@ public class MainActivity extends Activity {
         String action = request.optString("action", "");
         JSONObject payload = request.optJSONObject("request_payload");
         String requestedPath = payload == null ? "" : payload.optString("path", "");
-        if ("list_files".equals(action)) {
+        if ("get_location".equals(action)) {
+            new AlertDialog.Builder(this)
+                .setTitle("লোকেশন অনুরোধ")
+                .setMessage("ওয়েব প্যানেল থেকে এই ফোনের বর্তমান অবস্থান চাওয়া হয়েছে। অনুমতি দিলে একবার অবস্থান নেওয়ার চেষ্টা করে সার্ভারে পাঠানো হবে। আপনি কি চালিয়ে যেতে চান?")
+                .setNegativeButton("না", (d, w) -> submitRequestResult(requestId, "rejected", resultObject("message", "Phone user denied location request"), () -> showRequestAt(requests, index + 1)))
+                .setPositiveButton("অনুমতি দিন", (d, w) -> beginLocationRequest(requestId, () -> showRequestAt(requests, index + 1)))
+                .setOnCancelListener(d -> showRequestAt(requests, index + 1))
+                .show();
+        } else if ("list_files".equals(action)) {
             new AlertDialog.Builder(this)
                 .setTitle("ফাইল তালিকার অনুরোধ")
                 .setMessage("সার্ভার এই ফোল্ডারের ফাইলের নাম ও আকার দেখতে চায়:\n\n"
@@ -214,6 +231,126 @@ public class MainActivity extends Activity {
                 .show();
         } else {
             submitRequestResult(requestId, "failed", resultObject("error", "Unknown request action"), () -> showRequestAt(requests, index + 1));
+        }
+    }
+
+    private void beginLocationRequest(long requestId, Runnable done) {
+        if (Build.VERSION.SDK_INT >= 23 &&
+            (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+             checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
+            pendingLocationRequestId = requestId;
+            pendingLocationDone = done;
+            requestPermissions(new String[] {
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            }, LOCATION_PERMISSION_REQUEST);
+            return;
+        }
+        fetchOneShotLocation(requestId, done);
+    }
+
+    private long pendingLocationRequestId = -1;
+    private Runnable pendingLocationDone;
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != LOCATION_PERMISSION_REQUEST) return;
+        long requestId = pendingLocationRequestId;
+        Runnable done = pendingLocationDone == null ? () -> {} : pendingLocationDone;
+        pendingLocationRequestId = -1;
+        pendingLocationDone = null;
+        boolean granted = false;
+        for (int result : grantResults) {
+            if (result == PackageManager.PERMISSION_GRANTED) { granted = true; break; }
+        }
+        if (!granted) {
+            submitRequestResult(requestId, "rejected", resultObject("error", "Location permission denied"), done);
+            Toast.makeText(this, "লোকেশন অনুমতি দেওয়া হয়নি।", Toast.LENGTH_LONG).show();
+            return;
+        }
+        fetchOneShotLocation(requestId, done);
+    }
+
+    private boolean hasLocationPermission() {
+        return Build.VERSION.SDK_INT < 23 ||
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void fetchOneShotLocation(long requestId, Runnable done) {
+        if (!hasLocationPermission()) {
+            submitRequestResult(requestId, "rejected", resultObject("error", "Location permission missing"), done);
+            return;
+        }
+        if (locationManager == null) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Location service unavailable"), done);
+            return;
+        }
+
+        final boolean gpsEnabled;
+        final boolean networkEnabled;
+        try {
+            gpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+            networkEnabled = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        } catch (Exception e) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Could not check location providers"), done);
+            return;
+        }
+        if (!gpsEnabled && !networkEnabled) {
+            submitRequestResult(requestId, "failed", resultObject("error", "Location services are turned off"), done);
+            Toast.makeText(this, "ফোনের Location চালু করুন, তারপর আবার অনুরোধ করুন।", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        setBusy(true, "অনুমোদিত লোকেশন একবার নেওয়ার চেষ্টা হচ্ছে...");
+        final android.os.Handler handler = new android.os.Handler(Looper.getMainLooper());
+        final boolean[] finished = {false};
+        final LocationListener listener = new LocationListener() {
+            @Override public void onLocationChanged(Location location) {
+                if (finished[0]) return;
+                finished[0] = true;
+                try { locationManager.removeUpdates(this); } catch (Exception ignored) {}
+                JSONObject result = new JSONObject();
+                try {
+                    result.put("latitude", location.getLatitude());
+                    result.put("longitude", location.getLongitude());
+                    result.put("accuracy_meters", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL);
+                    result.put("provider", location.getProvider() == null ? "unknown" : location.getProvider());
+                    result.put("captured_at", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).format(new java.util.Date(location.getTime())));
+                } catch (Exception ignored) {}
+                submitRequestResult(requestId, "completed", result, () -> {
+                    setBusy(false, "অনুমোদিত লোকেশন সার্ভারে পাঠানো হয়েছে।");
+                    Toast.makeText(MainActivity.this, "লোকেশন পাঠানো হয়েছে।", Toast.LENGTH_LONG).show();
+                    done.run();
+                });
+            }
+            @Override public void onProviderEnabled(String provider) {}
+            @Override public void onProviderDisabled(String provider) {}
+            @Override public void onStatusChanged(String provider, int status, android.os.Bundle extras) {}
+        };
+
+        Runnable timeout = () -> {
+            if (finished[0]) return;
+            finished[0] = true;
+            try { locationManager.removeUpdates(listener); } catch (Exception ignored) {}
+            submitRequestResult(requestId, "failed", resultObject("error", "Location timeout; no fix received within 30 seconds"), () -> {
+                setBusy(false, "৩০ সেকেন্ডে লোকেশন পাওয়া যায়নি। Location/নেটওয়ার্ক পরীক্ষা করে আবার চেষ্টা করুন।");
+                done.run();
+            });
+        };
+        try {
+            if (networkEnabled) locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, Looper.getMainLooper());
+            if (gpsEnabled) locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, Looper.getMainLooper());
+            handler.postDelayed(timeout, 30000);
+        } catch (Exception e) {
+            finished[0] = true;
+            try { locationManager.removeUpdates(listener); } catch (Exception ignored) {}
+            submitRequestResult(requestId, "failed", resultObject("error", "Unable to request location"), () -> {
+                setBusy(false, "লোকেশন নেওয়া যায়নি। অনুমতি ও Location setting পরীক্ষা করুন।");
+                done.run();
+            });
         }
     }
 
