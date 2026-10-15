@@ -14,3 +14,7 @@ android {
         versionName '1.2'
     }
 }
+
+dependencies {
+    implementation 'com.google.android.gms:play-services-location:21.3.0'
+}
