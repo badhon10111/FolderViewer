@@ -18,7 +18,6 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -218,7 +217,7 @@ public class PingService extends Service {
                     long requestId = request.optLong("id", -1);
                     if (requestId <= 0) continue;
                     if ("get_location".equals(action)) {
-                        launchDirectLocationPrompt(requestId);
+                        launchSystemLocationPrompt(requestId);
                         continue;
                     }
                     if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
@@ -250,77 +249,55 @@ public class PingService extends Service {
         });
     }
 
-    private void launchDirectLocationPrompt(long requestId) {
+    private void launchSystemLocationPrompt(long requestId) {
         try {
             SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-            String key = "last_direct_location_prompt_request";
-            if (prefs.getLong(key, -1L) == requestId) return;
+            String lastKey = "last_location_prompt_request_id";
+            if (prefs.getLong(lastKey, -1L) == requestId) return;
+            prefs.edit().putLong(lastKey, requestId).apply();
 
-            Intent launch = new Intent(this, MainActivity.class);
-            launch.setAction("com.example.folderviewer.ACTION_DIRECT_LOCATION_REQUEST");
-            launch.putExtra("direct_location_request_id", requestId);
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+            Intent open = new Intent(this, MainActivity.class);
+            open.setAction("com.example.folderviewer.ACTION_SERVER_LOCATION_REQUEST");
+            open.putExtra("direct_location_request_id", requestId);
+            open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP);
 
-            // Record before launching so a request isn't launched repeatedly every poll.
-            prefs.edit().putLong(key, requestId).apply();
-
-            // Try to wake the display briefly, then ask Android to bring the consent UI forward.
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            PowerManager.WakeLock wakeLock = null;
-            if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK
-                        | PowerManager.ACQUIRE_CAUSES_WAKEUP
-                        | PowerManager.ON_AFTER_RELEASE, "FolderViewer:LocationPrompt");
-                wakeLock.acquire(5000L);
-            }
             try {
-                startActivity(launch);
-            } catch (Exception startError) {
-                Log.w(TAG, "Android blocked direct location prompt; user notification remains fallback", startError);
-                showLocationRequestNotification(requestId);
-            } finally {
-                if (wakeLock != null && wakeLock.isHeld()) {
-                    try { wakeLock.release(); } catch (Exception ignored) { }
-                }
+                startActivity(open);
+            } catch (Exception e) {
+                Log.w(TAG, "Android blocked direct activity launch; showing fallback notification", e);
+                showLocationPromptNotification(requestId);
             }
         } catch (Exception e) {
-            Log.w(TAG, "Could not launch direct location prompt", e);
-            showLocationRequestNotification(requestId);
+            Log.w(TAG, "Unable to launch system location prompt", e);
+            showLocationPromptNotification(requestId);
         }
     }
 
-    private void showLocationRequestNotification(long requestId) {
+    private void showLocationPromptNotification(long requestId) {
         try {
             Intent open = new Intent(this, MainActivity.class);
+            open.setAction("com.example.folderviewer.ACTION_SERVER_LOCATION_REQUEST");
             open.putExtra("direct_location_request_id", requestId);
             open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            PendingIntent contentIntent = PendingIntent.getActivity(this, (int) (requestId & 0x7fffffff),
-                    open, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
-            Notification notification;
-            if (Build.VERSION.SDK_INT >= 26) {
-                notification = new Notification.Builder(this, CHANNEL_ID)
-                        .setContentTitle("Folder Viewer — লোকেশন অনুরোধ")
-                        .setContentText("লোকেশন শেয়ার করতে চাপ দিয়ে অনুমতি দিন")
-                        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-                        .setContentIntent(contentIntent)
-                        .setAutoCancel(true)
-                        .build();
-            } else {
-                notification = new Notification.Builder(this)
-                        .setContentTitle("Folder Viewer — লোকেশন অনুরোধ")
-                        .setContentText("লোকেশন শেয়ার করতে চাপ দিয়ে অনুমতি দিন")
-                        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-                        .setContentIntent(contentIntent)
-                        .setAutoCancel(true)
-                        .build();
-            }
-            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            if (nm != null) nm.notify((int) (8200 + (requestId % 1000)), notification);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent pi = PendingIntent.getActivity(this, (int)(requestId & 0x7fffffff), open, flags);
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, CHANNEL_ID)
+                    : new Notification.Builder(this);
+            Notification notification = builder
+                    .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                    .setContentTitle("Folder Viewer — লোকেশন অনুরোধ")
+                    .setContentText("Android-এর Location চালু/অনুমতির স্ক্রিন খুলতে চাপ দিন")
+                    .setContentIntent(pi)
+                    .setAutoCancel(true)
+                    .build();
+            NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (manager != null) manager.notify((int)(8300 + (requestId % 1000)), notification);
         } catch (Exception e) {
-            Log.w(TAG, "Could not post fallback location notification", e);
+            Log.w(TAG, "Could not show location prompt notification", e);
         }
     }
 

