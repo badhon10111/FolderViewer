@@ -30,3 +30,5 @@ Security:
 - Keep Supabase secret/service-role keys server-side only. Do not put them in the Android app or web page.
 - The admin-gateway still checks the configured ADMIN_UID.
 - The app does not act on location requests silently; it requires in-app approval and Android permission.
+
+নতুন আপডেট: ওয়েব প্যানেল থেকে অনুমোদিত “লোকেশন আনুন” অনুরোধ এলে অ্যাপ Google Play services SettingsClient দিয়ে Location সেটিংস যাচাই করে। সেটিংস বন্ধ/অপর্যাপ্ত থাকলে Android-এর সিস্টেম ডায়ালগ দেখাতে চেষ্টা করে। ব্যবহারকারী Turn on/সম্মতি না দিলে লোকেশন সংগ্রহ বা পাঠানো হয় না। এই পরিবর্তনের জন্য অ্যাপের ডিজাইন নতুন করে করতে হয়নি; আগের UI রাখা হয়েছে।
