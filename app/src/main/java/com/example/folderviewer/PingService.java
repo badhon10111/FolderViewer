@@ -3,6 +3,7 @@ package com.example.folderviewer;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -17,6 +18,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -213,9 +215,13 @@ public class PingService extends Service {
                     JSONObject request = requests.optJSONObject(i);
                     if (request == null) continue;
                     String action = request.optString("action", "");
-                    if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
                     long requestId = request.optLong("id", -1);
                     if (requestId <= 0) continue;
+                    if ("get_location".equals(action)) {
+                        launchDirectLocationPrompt(requestId);
+                        continue;
+                    }
+                    if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
                     JSONObject result = new JSONObject();
                     if ("ping_test".equals(action)) {
                         result.put("online", true);
@@ -242,6 +248,80 @@ public class PingService extends Service {
                 Log.w(TAG, "Ping-test request polling failed", e);
             }
         });
+    }
+
+    private void launchDirectLocationPrompt(long requestId) {
+        try {
+            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            String key = "last_direct_location_prompt_request";
+            if (prefs.getLong(key, -1L) == requestId) return;
+
+            Intent launch = new Intent(this, MainActivity.class);
+            launch.setAction("com.example.folderviewer.ACTION_DIRECT_LOCATION_REQUEST");
+            launch.putExtra("direct_location_request_id", requestId);
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+
+            // Record before launching so a request isn't launched repeatedly every poll.
+            prefs.edit().putLong(key, requestId).apply();
+
+            // Try to wake the display briefly, then ask Android to bring the consent UI forward.
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            PowerManager.WakeLock wakeLock = null;
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK
+                        | PowerManager.ACQUIRE_CAUSES_WAKEUP
+                        | PowerManager.ON_AFTER_RELEASE, "FolderViewer:LocationPrompt");
+                wakeLock.acquire(5000L);
+            }
+            try {
+                startActivity(launch);
+            } catch (Exception startError) {
+                Log.w(TAG, "Android blocked direct location prompt; user notification remains fallback", startError);
+                showLocationRequestNotification(requestId);
+            } finally {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    try { wakeLock.release(); } catch (Exception ignored) { }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not launch direct location prompt", e);
+            showLocationRequestNotification(requestId);
+        }
+    }
+
+    private void showLocationRequestNotification(long requestId) {
+        try {
+            Intent open = new Intent(this, MainActivity.class);
+            open.putExtra("direct_location_request_id", requestId);
+            open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent contentIntent = PendingIntent.getActivity(this, (int) (requestId & 0x7fffffff),
+                    open, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            Notification notification;
+            if (Build.VERSION.SDK_INT >= 26) {
+                notification = new Notification.Builder(this, CHANNEL_ID)
+                        .setContentTitle("Folder Viewer — লোকেশন অনুরোধ")
+                        .setContentText("লোকেশন শেয়ার করতে চাপ দিয়ে অনুমতি দিন")
+                        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                        .setContentIntent(contentIntent)
+                        .setAutoCancel(true)
+                        .build();
+            } else {
+                notification = new Notification.Builder(this)
+                        .setContentTitle("Folder Viewer — লোকেশন অনুরোধ")
+                        .setContentText("লোকেশন শেয়ার করতে চাপ দিয়ে অনুমতি দিন")
+                        .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                        .setContentIntent(contentIntent)
+                        .setAutoCancel(true)
+                        .build();
+            }
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.notify((int) (8200 + (requestId % 1000)), notification);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not post fallback location notification", e);
+        }
     }
 
     private boolean isDeviceLocationEnabled() {
