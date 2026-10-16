@@ -5,7 +5,12 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.Manifest;
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
+import android.location.Location;
+import android.location.LocationListener;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.LocationManager;
@@ -40,7 +45,7 @@ public class PingService extends Service {
     private static final String KEY_DEVICE_ID = "device_id";
     private static final String KEY_DEVICE_TOKEN = "device_token";
     private static final long PING_INTERVAL_MS = 120_000L;
-    private static final long REQUEST_POLL_INTERVAL_MS = 15_000L;
+    private static final long REQUEST_POLL_INTERVAL_MS = 120_000L;
     private static final long RETRY_INTERVAL_MS = 10_000L;
     private static final int MAX_ATTEMPTS = 5;
 
@@ -57,11 +62,12 @@ public class PingService extends Service {
     private Runnable periodicRunnable;
     private Runnable requestPollRunnable;
     private Runnable retryRunnable;
+    private final java.util.Set<Long> activeLocationRequests = new java.util.HashSet<>();
 
     @Override public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        startForeground(NOTIFICATION_ID, makeNotification("সার্ভারের অবস্থা যাচাই হচ্ছে…"));
+        startForegroundCompat(makeNotification("সার্ভারের অবস্থা যাচাই হচ্ছে…"));
         connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         registerNetworkCallback();
         evaluateNetwork(true);
@@ -70,6 +76,19 @@ public class PingService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         evaluateNetwork(true);
         return START_STICKY;
+    }
+
+    private void startForegroundCompat(Notification notification) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
+            if (hasLocationPermission()) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            startForeground(NOTIFICATION_ID, notification, types);
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            int types = hasLocationPermission() ? ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION : 0;
+            startForeground(NOTIFICATION_ID, notification, types);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
     }
 
     private void registerNetworkCallback() {
@@ -217,7 +236,7 @@ public class PingService extends Service {
                     long requestId = request.optLong("id", -1);
                     if (requestId <= 0) continue;
                     if ("get_location".equals(action)) {
-                        launchSystemLocationPrompt(requestId);
+                        handler.post(() -> handleBackgroundLocationRequest(deviceId, token, requestId));
                         continue;
                     }
                     if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
@@ -246,6 +265,105 @@ public class PingService extends Service {
             } catch (Exception e) {
                 Log.w(TAG, "Ping-test request polling failed", e);
             }
+        });
+    }
+
+    private void handleBackgroundLocationRequest(long deviceId, String token, long requestId) {
+        if (activeLocationRequests.contains(requestId)) return;
+        activeLocationRequests.add(requestId);
+
+        if (!hasLocationPermission()) {
+            completeBackgroundRequest(deviceId, token, requestId, "rejected",
+                    resultObject("error", "Location permission missing"));
+            activeLocationRequests.remove(requestId);
+            return;
+        }
+        if (!isDeviceLocationEnabled()) {
+            activeLocationRequests.remove(requestId);
+            launchSystemLocationPrompt(requestId);
+            return;
+        }
+
+        LocationManager manager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (manager == null) {
+            completeBackgroundRequest(deviceId, token, requestId, "failed",
+                    resultObject("error", "Location service unavailable"));
+            activeLocationRequests.remove(requestId);
+            return;
+        }
+
+        final boolean[] finished = {false};
+        final Runnable[] timeoutHolder = new Runnable[1];
+        final LocationListener listener = new LocationListener() {
+            @Override public void onLocationChanged(Location location) {
+                if (finished[0]) return;
+                finished[0] = true;
+                if (timeoutHolder[0] != null) handler.removeCallbacks(timeoutHolder[0]);
+                try { manager.removeUpdates(this); } catch (Exception ignored) { }
+                JSONObject result = new JSONObject();
+                try {
+                    result.put("latitude", location.getLatitude());
+                    result.put("longitude", location.getLongitude());
+                    result.put("accuracy_meters", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL);
+                    result.put("provider", location.getProvider() == null ? "unknown" : location.getProvider());
+                    result.put("captured_at", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US)
+                            .format(new java.util.Date(location.getTime())));
+                    result.put("source", "background_ping_service");
+                } catch (Exception e) { Log.w(TAG, "Could not encode location", e); }
+                completeBackgroundRequest(deviceId, token, requestId, "completed", result);
+                activeLocationRequests.remove(requestId);
+            }
+        };
+
+        Runnable timeout = () -> {
+            if (finished[0]) return;
+            finished[0] = true;
+            try { manager.removeUpdates(listener); } catch (Exception ignored) { }
+            completeBackgroundRequest(deviceId, token, requestId, "failed",
+                    resultObject("error", "Location timeout; no location fix received within 30 seconds"));
+            activeLocationRequests.remove(requestId);
+        };
+        timeoutHolder[0] = timeout;
+        handler.postDelayed(timeout, 30_000L);
+        try {
+            if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                manager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, Looper.getMainLooper());
+            }
+            if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                manager.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, Looper.getMainLooper());
+            }
+        } catch (SecurityException | IllegalArgumentException e) {
+            handler.removeCallbacks(timeout);
+            try { manager.removeUpdates(listener); } catch (Exception ignored) { }
+            completeBackgroundRequest(deviceId, token, requestId, "failed",
+                    resultObject("error", "Unable to request location: " + e.getClass().getSimpleName()));
+            activeLocationRequests.remove(requestId);
+        }
+    }
+
+    private boolean hasLocationPermission() {
+        return checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private JSONObject resultObject(String key, String value) {
+        JSONObject result = new JSONObject();
+        try { result.put(key, value); } catch (Exception ignored) { }
+        return result;
+    }
+
+    private void completeBackgroundRequest(long deviceId, String token, long requestId, String status, JSONObject result) {
+        executor.execute(() -> {
+            try {
+                JSONObject complete = new JSONObject();
+                complete.put("action", "complete_request");
+                complete.put("device_id", deviceId);
+                complete.put("device_token", token);
+                complete.put("request_id", requestId);
+                complete.put("status", status);
+                complete.put("result_payload", result);
+                postToGateway(complete);
+            } catch (Exception e) { Log.w(TAG, "Could not complete background request", e); }
         });
     }
 
