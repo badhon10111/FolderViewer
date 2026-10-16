@@ -572,7 +572,6 @@ public class MainActivity extends Activity {
 
     private void setBusy(boolean busy, String message) {
         statusView.setText(message);
-        if (requestsButton != null) requestsButton.setEnabled(!busy);
     }
 
     private boolean hasAllFilesAccess() {
