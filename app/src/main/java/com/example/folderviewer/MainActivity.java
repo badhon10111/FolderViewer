@@ -59,7 +59,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private ListView listView;
     private Button permissionButton;
-    private Button requestsButton;
+
     private LocationManager locationManager;
     private static final int LOCATION_PERMISSION_REQUEST = 7401;
     private static final int LOCATION_SETTINGS_REQUEST = 7402;
@@ -603,11 +603,6 @@ public class MainActivity extends Activity {
         permissionButton.setOnClickListener(v -> requestAllFilesAccess());
         root.addView(permissionButton, new LinearLayout.LayoutParams(-1, -2));
 
-
-        requestsButton = new Button(this);
-        requestsButton.setText("সার্ভারের অনুরোধ দেখুন");
-        requestsButton.setOnClickListener(v -> checkServerRequests());
-        root.addView(requestsButton, new LinearLayout.LayoutParams(-1, -2));
 
         pathView = new TextView(this);
         pathView.setTextSize(13);
