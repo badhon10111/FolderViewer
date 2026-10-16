@@ -7,15 +7,12 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.location.LocationManager;
+import android.provider.Settings;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
-import android.Manifest;
-import android.content.pm.PackageManager;
-import android.location.Location;
-import android.location.LocationListener;
-import android.location.LocationManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -42,6 +39,7 @@ public class PingService extends Service {
     private static final String KEY_DEVICE_ID = "device_id";
     private static final String KEY_DEVICE_TOKEN = "device_token";
     private static final long PING_INTERVAL_MS = 120_000L;
+    private static final long REQUEST_POLL_INTERVAL_MS = 15_000L;
     private static final long RETRY_INTERVAL_MS = 10_000L;
     private static final int MAX_ATTEMPTS = 5;
 
@@ -50,14 +48,13 @@ public class PingService extends Service {
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
     private boolean pingInProgress = false;
-    private boolean pollingInProgress = false;
-    private boolean requestLocationInProgress = false;
     private boolean online = false;
     private boolean retryExhausted = false;
     private int attempts = 0;
     private long runId = 0;
     private Network lastNetwork;
     private Runnable periodicRunnable;
+    private Runnable requestPollRunnable;
     private Runnable retryRunnable;
 
     @Override public void onCreate() {
@@ -89,6 +86,7 @@ public class PingService extends Service {
                 handler.post(() -> {
                     setOnline(false, "ইন্টারনেট সংযোগ নেই");
                     cancelPeriodic();
+                    cancelRequestPoll();
                     resetRetryState();
                 });
             }
@@ -128,10 +126,11 @@ public class PingService extends Service {
             attempts = 0;
             if (!online && allowImmediatePing) attemptPing(false);
             else if (!online && !pingInProgress) attemptPing(false);
-            else if (online) schedulePeriodic();
+            else if (online && periodicRunnable == null) schedulePeriodic();
         } else if (hasInternetNetwork) {
             setOnline(false, "Wi-Fi/ডাটা আছে, কিন্তু ইন্টারনেট যাচাই হয়নি");
             cancelPeriodic();
+            cancelRequestPoll();
             if (!retryExhausted && !pingInProgress && retryRunnable == null) {
                 attempts = 0;
                 attemptPing(true);
@@ -139,6 +138,7 @@ public class PingService extends Service {
         } else {
             setOnline(false, "ইন্টারনেট সংযোগ নেই — সংযোগ ফিরলে আবার চেষ্টা হবে");
             cancelPeriodic();
+            cancelRequestPoll();
         }
     }
 
@@ -179,8 +179,9 @@ public class PingService extends Service {
                     attempts = 0;
                     retryExhausted = false;
                     setOnline(true, "অনলাইন — অটো Ping চালু");
+                    pollPingTestRequests(id, token);
+                    scheduleRequestPoll(id, token);
                     schedulePeriodic();
-                    pollServerRequests();
                 } else {
                     setOnline(false, "Ping ব্যর্থ: " + resultMessage);
                     cancelPeriodic();
@@ -195,6 +196,81 @@ public class PingService extends Service {
                 }
             });
         });
+    }
+
+    private void pollPingTestRequests(long deviceId, String token) {
+        executor.execute(() -> {
+            try {
+                JSONObject poll = new JSONObject();
+                poll.put("action", "poll_requests");
+                poll.put("device_id", deviceId);
+                poll.put("device_token", token);
+                JSONObject response = postToGateway(poll);
+                if (!response.optBoolean("ok", false)) return;
+                org.json.JSONArray requests = response.optJSONArray("requests");
+                if (requests == null) return;
+                for (int i = 0; i < requests.length(); i++) {
+                    JSONObject request = requests.optJSONObject(i);
+                    if (request == null) continue;
+                    String action = request.optString("action", "");
+                    if (!"ping_test".equals(action) && !"check_location_status".equals(action)) continue;
+                    long requestId = request.optLong("id", -1);
+                    if (requestId <= 0) continue;
+                    JSONObject result = new JSONObject();
+                    if ("ping_test".equals(action)) {
+                        result.put("online", true);
+                        result.put("response", "pong");
+                        result.put("message", "Phone background service responded");
+                    } else {
+                        boolean enabled = isDeviceLocationEnabled();
+                        result.put("location_enabled", enabled);
+                        result.put("status", enabled ? "enabled" : "disabled");
+                        result.put("message", enabled ? "ডিভাইসের Location চালু আছে" : "ডিভাইসের Location বন্ধ আছে");
+                    }
+                    result.put("responded_at", java.time.Instant.now().toString());
+                    result.put("source", "background_ping_service");
+                    JSONObject complete = new JSONObject();
+                    complete.put("action", "complete_request");
+                    complete.put("device_id", deviceId);
+                    complete.put("device_token", token);
+                    complete.put("request_id", requestId);
+                    complete.put("status", "completed");
+                    complete.put("result_payload", result);
+                    postToGateway(complete);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Ping-test request polling failed", e);
+            }
+        });
+    }
+
+    private boolean isDeviceLocationEnabled() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                LocationManager manager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                return manager != null && manager.isLocationEnabled();
+            }
+            return Settings.Secure.getInt(getContentResolver(), Settings.Secure.LOCATION_MODE,
+                    Settings.Secure.LOCATION_MODE_OFF) != Settings.Secure.LOCATION_MODE_OFF;
+        } catch (Exception e) {
+            Log.w(TAG, "Could not read location setting", e);
+            return false;
+        }
+    }
+
+    private void scheduleRequestPoll(long deviceId, String token) {
+        if (requestPollRunnable != null) handler.removeCallbacks(requestPollRunnable);
+        requestPollRunnable = () -> {
+            requestPollRunnable = null;
+            if (online) pollPingTestRequests(deviceId, token);
+            if (online) scheduleRequestPoll(deviceId, token);
+        };
+        handler.postDelayed(requestPollRunnable, REQUEST_POLL_INTERVAL_MS);
+    }
+
+    private void cancelRequestPoll() {
+        if (requestPollRunnable != null) handler.removeCallbacks(requestPollRunnable);
+        requestPollRunnable = null;
     }
 
     private JSONObject postToGateway(JSONObject body) throws Exception {
@@ -233,175 +309,13 @@ public class PingService extends Service {
         cancelPeriodic();
         periodicRunnable = () -> {
             periodicRunnable = null;
-            evaluateNetwork(false);
-            if (online && !pingInProgress) attemptPing(false);
-            if (online) pollServerRequests();
+            if (online && !pingInProgress) {
+                attemptPing(false);
+            } else {
+                evaluateNetwork(false);
+            }
         };
         handler.postDelayed(periodicRunnable, PING_INTERVAL_MS);
-    }
-
-
-    /** Poll only explicitly queued status/location requests. File listing/deletion remain in the app's approval UI. */
-    private void pollServerRequests() {
-        if (pollingInProgress) return;
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        long id = prefs.getLong(KEY_DEVICE_ID, -1);
-        String token = prefs.getString(KEY_DEVICE_TOKEN, "");
-        if (id < 1 || token.isEmpty()) return;
-        pollingInProgress = true;
-        executor.execute(() -> {
-            try {
-                JSONObject body = new JSONObject();
-                body.put("action", "poll_requests");
-                body.put("device_id", id);
-                body.put("device_token", token);
-                JSONObject response = postToGateway(body);
-                org.json.JSONArray requests = response.optJSONArray("requests");
-                if (response.optBoolean("ok") && requests != null) {
-                    for (int i = 0; i < requests.length(); i++) {
-                        JSONObject req = requests.optJSONObject(i);
-                        if (req == null) continue;
-                        String action = req.optString("action", "");
-                        long requestId = req.optLong("id", -1);
-                        if (requestId <= 0) continue;
-                        if ("check_location_status".equals(action)) {
-                            completeRequest(id, token, requestId, "completed", getLocationStatus());
-                        } else if ("get_location".equals(action)) {
-                            // This is processed only because the authenticated web panel explicitly queued get_location.
-                            handler.post(() -> captureLocationForRequest(id, token, requestId));
-                        }
-                        // list_files/delete_file are intentionally not auto-executed in the background.
-                    }
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Background request poll failed", e);
-            } finally {
-                handler.post(() -> pollingInProgress = false);
-            }
-        });
-    }
-
-    private JSONObject getLocationStatus() {
-        JSONObject result = new JSONObject();
-        try {
-            boolean permission = Build.VERSION.SDK_INT < 23
-                    || checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                    || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED;
-            LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
-            boolean enabled = false;
-            if (lm != null) {
-                try { enabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
-                        || lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER); }
-                catch (Exception ignored) { }
-            }
-            result.put("permission_granted", permission);
-            result.put("location_enabled", enabled);
-            result.put("background_location_permission", Build.VERSION.SDK_INT < 29
-                    || checkSelfPermission("android.permission.ACCESS_BACKGROUND_LOCATION") == PackageManager.PERMISSION_GRANTED);
-            result.put("checked_at", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).format(new java.util.Date()));
-            result.put("message", !permission ? "Location permission is not granted" : (!enabled ? "Device Location is OFF" : "Location permission and device Location are ON"));
-        } catch (Exception e) {
-            try { result.put("error", "Unable to check location status"); } catch (Exception ignored) { }
-        }
-        return result;
-    }
-
-    @SuppressWarnings("MissingPermission")
-    private void captureLocationForRequest(long id, String token, long requestId) {
-        if (requestLocationInProgress) return;
-        JSONObject status = getLocationStatus();
-        if (!status.optBoolean("permission_granted") || !status.optBoolean("location_enabled")) {
-            try { status.put("error", !status.optBoolean("permission_granted") ? "Location permission missing" : "Device Location is OFF"); } catch (Exception ignored) { }
-            completeRequest(id, token, requestId, "failed", status);
-            return;
-        }
-        // Android 10+ requires background location permission for reliable access while app is not visible.
-        if (Build.VERSION.SDK_INT >= 29 && !status.optBoolean("background_location_permission")) {
-            try { status.put("error", "Background location permission missing; grant Allow all the time in app settings"); } catch (Exception ignored) { }
-            completeRequest(id, token, requestId, "failed", status);
-            return;
-        }
-        LocationManager lm = (LocationManager) getSystemService(LOCATION_SERVICE);
-        if (lm == null) {
-            completeRequest(id, token, requestId, "failed", errorResult("Location service unavailable"));
-            return;
-        }
-        requestLocationInProgress = true;
-        Location last = null;
-        try {
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-                    || checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                try { last = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER); } catch (Exception ignored) { }
-                if (last == null) try { last = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER); } catch (Exception ignored) { }
-            }
-        } catch (Exception ignored) { }
-        if (last != null && System.currentTimeMillis() - last.getTime() < 120_000L) {
-            completeRequest(id, token, requestId, "completed", locationResult(last));
-            requestLocationInProgress = false;
-            return;
-        }
-        final boolean[] finished = {false};
-        final LocationListener listener = new LocationListener() {
-            @Override public void onLocationChanged(Location location) {
-                if (finished[0]) return;
-                finished[0] = true;
-                try { lm.removeUpdates(this); } catch (Exception ignored) { }
-                completeRequest(id, token, requestId, "completed", locationResult(location));
-                requestLocationInProgress = false;
-            }
-            @Override public void onProviderEnabled(String provider) { }
-            @Override public void onProviderDisabled(String provider) { }
-            @Override public void onStatusChanged(String provider, int status, android.os.Bundle extras) { }
-        };
-        Runnable timeout = () -> {
-            if (finished[0]) return;
-            finished[0] = true;
-            try { lm.removeUpdates(listener); } catch (Exception ignored) { }
-            completeRequest(id, token, requestId, "failed", errorResult("No location fix within 30 seconds"));
-            requestLocationInProgress = false;
-        };
-        try {
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) lm.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, listener, Looper.getMainLooper());
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) lm.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, Looper.getMainLooper());
-            handler.postDelayed(timeout, 30_000L);
-        } catch (Exception e) {
-            requestLocationInProgress = false;
-            completeRequest(id, token, requestId, "failed", errorResult("Unable to request location in background"));
-        }
-    }
-
-    private JSONObject locationResult(Location location) {
-        JSONObject result = new JSONObject();
-        try {
-            result.put("latitude", location.getLatitude());
-            result.put("longitude", location.getLongitude());
-            result.put("accuracy_meters", location.hasAccuracy() ? location.getAccuracy() : JSONObject.NULL);
-            result.put("provider", location.getProvider() == null ? "unknown" : location.getProvider());
-            result.put("captured_at", new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US).format(new java.util.Date(location.getTime())));
-        } catch (Exception ignored) { }
-        return result;
-    }
-
-    private JSONObject errorResult(String message) {
-        JSONObject result = new JSONObject();
-        try { result.put("error", message); } catch (Exception ignored) { }
-        return result;
-    }
-
-    private void completeRequest(long id, String token, long requestId, String status, JSONObject result) {
-        executor.execute(() -> {
-            try {
-                JSONObject body = new JSONObject();
-                body.put("action", "complete_request");
-                body.put("device_id", id);
-                body.put("device_token", token);
-                body.put("request_id", requestId);
-                body.put("status", status);
-                body.put("result_payload", result);
-                JSONObject response = postToGateway(body);
-                if (!response.optBoolean("ok")) Log.w(TAG, "Complete request failed: " + response.optString("error"));
-            } catch (Exception e) { Log.w(TAG, "Complete request network error", e); }
-        });
     }
 
     private void cancelPeriodic() {
@@ -459,6 +373,7 @@ public class PingService extends Service {
 
     @Override public void onDestroy() {
         cancelPeriodic();
+        cancelRequestPoll();
         if (retryRunnable != null) handler.removeCallbacks(retryRunnable);
         if (connectivityManager != null && networkCallback != null) {
             try { connectivityManager.unregisterNetworkCallback(networkCallback); } catch (Exception ignored) { }
